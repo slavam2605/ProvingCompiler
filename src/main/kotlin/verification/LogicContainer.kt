@@ -56,7 +56,13 @@ class LogicContainer(private val compilerMessagePrinter: CompilerMessagePrinter)
         }
     }
 
-    override fun toString() = "$trueList"
+    fun printStatus(printer: CompilerMessagePrinter, offset: Int) {
+        printer.printInformation(offset, "Logic container dump")
+        println("\tTrue facts:")
+        trueList.forEach { println("\t\t$it") }
+        compareEqualitySets.printStatus()
+        println()
+    }
 
     companion object {
         fun merge(left: LogicContainer, right: LogicContainer): LogicContainer {
@@ -187,6 +193,10 @@ sealed class LogicExpr(private val precedence: Int, vararg val children: LogicEx
                     val intValue = node[LanguageResolver.IntConst.key] ?: return null
                     LogicInt(intValue.value)
                 }
+                is BoolNode -> {
+                    val boolValue = node[LanguageResolver.BoolConst.key] ?: return null
+                    LogicBool(boolValue.value)
+                }
                 is NameNode -> {
                     val symbol = node[LanguageResolver.ResolvedSymbol.key] ?: return null
                     LogicVar(symbol)
@@ -201,6 +211,20 @@ sealed class LogicExpr(private val precedence: Int, vararg val children: LogicEx
             }
         }
     }
+}
+
+class LogicBool(val value: Boolean) : LogicExpr(1000) {
+    override fun shallowEquals(other: LogicExpr) = this == other
+
+    override fun equals(other: Any?): Boolean {
+        return other is LogicBool && value == other.value
+    }
+
+    override fun hashCode(): Int {
+        return Objects.hash(LogicBool::class.java, value)
+    }
+
+    override fun toString() = "$value"
 }
 
 class LogicInt(val value: Long) : LogicExpr(1000) {

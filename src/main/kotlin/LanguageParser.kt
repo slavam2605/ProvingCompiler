@@ -19,6 +19,8 @@ object LanguageParser {
         val returnKeyword by keyword("return")
         val letKeyword by keyword("let")
         val mutKeyword by keyword("mut")
+        val trueKeyword by keyword("true")
+        val falseKeyword by keyword("false")
         val id by regexToken("[a-zA-Z_][a-zA-Z0-9_]*")
         val int by regexToken("[0-9]+")
         val semicolon by literalToken(";")
@@ -58,10 +60,11 @@ object LanguageParser {
 
         val typeExpr by id map { TypeNameNode(it.text, it.offset) }
 
+        val boolExpr by (trueKeyword or falseKeyword) map { BoolNode(it.text, it.offset) }
         val intExpr by int map { IntNode(it.text, it.offset) }
         val nameExpr by id map { NameNode(it.text, it.offset) }
         val bracedExpr by -leftPar * ref(::expr) * -rightPar
-        val term by bracedExpr or nameExpr or intExpr
+        val term by bracedExpr or boolExpr or intExpr or nameExpr
         val notExpr by (excl * term map { NotNode(it.second, it.first.offset) }) or term
 
         val mulDivExpr by leftAssociative(notExpr, mulDivOp) { l, op, r -> ArithmeticNode(l, r, op, l.offset) }

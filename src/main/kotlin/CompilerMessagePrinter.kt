@@ -32,7 +32,6 @@ class CompilerMessagePrinter(private val input: String) {
 
         val lineNumber = getLineNumber(offset)
         println("Line $lineNumber: $message")
-        println()
     }
 
     private fun getLineNumber(offset: Int) =

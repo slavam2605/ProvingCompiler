@@ -65,6 +65,8 @@ class NameNode(val name: String, offset: Int) : ExprNode(offset)
 
 class IntNode(val value: String, offset: Int) : ExprNode(offset)
 
+class BoolNode(val value: String, offset: Int) : ExprNode(offset)
+
 // =============== Statements ===============
 
 class AssignNode(val name: ExprNode, val expr: ExprNode, offset: Int) : StatementNode(offset)

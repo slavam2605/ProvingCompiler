@@ -83,6 +83,20 @@ class LanguageResolver(private val input: String) {
         return IntType
     }
 
+    private fun resolveBool(node: BoolNode): ResolvedType? {
+        val value = when (node.value) {
+            "true" -> true
+            "false" -> false
+            else -> {
+                compilerMessagePrinter.printError(node.offset, "Unknown bool constant: '${node.value}'", "here")
+                return null
+            }
+        }
+
+        node[BoolConst.key] = BoolConst(value)
+        return BoolType
+    }
+
     private fun resolveName(node: NameNode): ResolvedType? {
         val symbol = symbolMap[node.name]
         if (symbol == null) {
@@ -102,6 +116,7 @@ class LanguageResolver(private val input: String) {
             is AndNode -> resolveAnd(node)
             is NotNode -> resolveNot(node)
             is IntNode -> resolveInt(node)
+            is BoolNode -> resolveBool(node)
             is NameNode -> resolveName(node)
         }
     }
@@ -196,12 +211,7 @@ class LanguageResolver(private val input: String) {
             return
         }
 
-        compilerMessagePrinter.printInformation(node.offset,
-            "True facts: ${
-                logicContainer.toString().removeSurrounding("[", "]")
-                    .split(",").joinToString(separator = "") { "\n\t$it" }
-            }"
-        )
+        logicContainer.printStatus(compilerMessagePrinter, node.offset)
     }
 
     fun resolveBlock(node: BlockNode) {
@@ -278,6 +288,12 @@ class LanguageResolver(private val input: String) {
     class IntConst(val value: Long) {
         companion object {
             val key = ContextKey<IntConst>("int.const")
+        }
+    }
+
+    class BoolConst(val value: Boolean) {
+        companion object {
+            val key = ContextKey<BoolConst>("bool.const")
         }
     }
 
