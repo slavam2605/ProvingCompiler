@@ -12,11 +12,12 @@ class LanguageResolver(private val input: String) {
     private val compilerMessagePrinter = CompilerMessagePrinter(input)
     private var logicContainer = LogicContainer(compilerMessagePrinter)
 
-    private inline fun <T> withLogicContainer(newContainer: LogicContainer, block: () -> T): T {
+    private inline fun withLogicContainer(newContainer: LogicContainer, block: () -> Unit): LogicContainer {
         val oldContainer = logicContainer
         try {
             logicContainer = newContainer
-            return block()
+            block()
+            return logicContainer
         } finally {
             logicContainer = oldContainer
         }
@@ -56,6 +57,12 @@ class LanguageResolver(private val input: String) {
     }
 
     private fun resolveOr(node: OrNode): ResolvedType? {
+        assertType(resolveExpr(node.left), BoolType, node.left.offset) ?: return null
+        assertType(resolveExpr(node.right), BoolType, node.right.offset) ?: return null
+        return BoolType
+    }
+
+    private fun resolveArrow(node: ArrowNode): ResolvedType? {
         assertType(resolveExpr(node.left), BoolType, node.left.offset) ?: return null
         assertType(resolveExpr(node.right), BoolType, node.right.offset) ?: return null
         return BoolType
@@ -112,6 +119,7 @@ class LanguageResolver(private val input: String) {
         return when (node) {
             is ArithmeticNode -> resolveArithmetic(node)
             is CompareNode -> resolveCompare(node)
+            is ArrowNode -> resolveArrow(node)
             is OrNode -> resolveOr(node)
             is AndNode -> resolveAnd(node)
             is NotNode -> resolveNot(node)
@@ -124,13 +132,13 @@ class LanguageResolver(private val input: String) {
     private fun resolveIf(node: IfNode) {
         resolveExpr(node.cond)
 
-        val trueContainer = logicContainer.clone().apply { addTrue(node.cond) }
-        val falseContainer = logicContainer.clone().apply { addFalse(node.cond) }
+        var trueContainer = logicContainer.clone().apply { addTrue(node.cond) }
+        var falseContainer = logicContainer.clone().apply { addFalse(node.cond) }
 
-        withLogicContainer(trueContainer) {
+        trueContainer = withLogicContainer(trueContainer) {
             resolveBlock(node.trueBlock)
         }
-        withLogicContainer(falseContainer) {
+        falseContainer = withLogicContainer(falseContainer) {
             node.falseBlock?.let { resolveBlock(it) }
         }
         logicContainer = LogicContainer.merge(trueContainer, falseContainer)
@@ -138,13 +146,7 @@ class LanguageResolver(private val input: String) {
 
     private fun resolveLet(node: LetNode) {
         symbolMap[node.name]?.let { existingSymbol ->
-            compilerMessagePrinter.printError(node.nameOffset, "Variable '${node.name}' is already defined in this scope", "redeclaration", false)
-            when (existingSymbol) {
-                is ResolvedSymbol.LocalVariable -> {
-                    compilerMessagePrinter.printError(existingSymbol.node.nameOffset, null, "previous declaration", false)
-                }
-            }
-            compilerMessagePrinter.newLineError()
+            compilerMessagePrinter.printRedeclarationError(node.nameOffset, node.name, existingSymbol)
             return
         }
 
@@ -167,8 +169,7 @@ class LanguageResolver(private val input: String) {
                 LogicCompare(
                 LogicVar(declaredSymbol),
                 LogicExpr.fromAst(node.initExpr) ?: return,
-                CompareNode.CompareOp.EQ
-            )
+                CompareNode.CompareOp.EQ)
             )
         }
     }
@@ -197,9 +198,26 @@ class LanguageResolver(private val input: String) {
         resolveExpr(node.expr)
     }
 
+    private fun resolveLetEquals(node: LetEqualsNode) {
+        symbolMap[node.name]?.let { existingSymbol ->
+            compilerMessagePrinter.printRedeclarationError(node.nameOffset, node.name, existingSymbol)
+            return
+        }
+
+        val type = resolveExpr(node.expr) ?: return
+
+        symbolMap[node.name] = ResolvedSymbol.LetAlias(node.name, node, type)
+    }
+
     private fun resolveProofBlock(node: ProofBlockNode) {
-        node.exprList.forEach {
-            resolveExpr(it)
+        symbolMap.withScope {
+            node.exprList.forEach {
+                when (it) {
+                    is ExprNode -> resolveExpr(it)
+                    is LetEqualsNode -> resolveLetEquals(it)
+                    else -> error("Unknown proof element: ${it.javaClass}")
+                }
+            }
         }
 
         logicContainer.verifyProofAndCollect(node.exprList)
@@ -278,6 +296,14 @@ class LanguageResolver(private val input: String) {
 //            override fun toString() = "local($name)"
             // TODO return local() later
             override fun toString() = "$name"
+        }
+
+        class LetAlias(val name: String, val node: LetEqualsNode, type: ResolvedType) : ResolvedSymbol(type) {
+            override fun toString() = "alias($name)"
+        }
+
+        class PatternName(val name: String) : ResolvedSymbol(TypeErrorMarker) {
+            override fun toString() = "\$$name"
         }
 
         companion object {

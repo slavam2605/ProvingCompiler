@@ -25,19 +25,35 @@ class CompilerMessagePrinter(private val input: String) {
         }
     }
 
+    fun printRedeclarationError(offset: Int, name: String, existingSymbol: LanguageResolver.ResolvedSymbol) {
+        printError(offset, "Variable '${name}' is already defined in this scope", "redeclaration", false)
+        when (existingSymbol) {
+            is LanguageResolver.ResolvedSymbol.LocalVariable -> {
+                printError(existingSymbol.node.nameOffset, null, "previous declaration", false)
+            }
+            is LanguageResolver.ResolvedSymbol.LetAlias -> {
+                printError(existingSymbol.node.nameOffset, null, "previous declaration", false)
+            }
+            is LanguageResolver.ResolvedSymbol.PatternName -> {
+                error("Unexpected symbol type: PatternName must only appear in axiom patterns")
+            }
+        }
+        newLineError()
+    }
+
     fun printInformation(offset: Int, message: String) {
         if (offset < 0) {
             println(message)
         }
 
         val lineNumber = getLineNumber(offset)
-        println("Line $lineNumber: $message")
+        println("Line ${lineNumber + 1}: $message")
     }
 
     private fun getLineNumber(offset: Int) =
         input.substring(0, offset).count { it == LINE_BREAK_CHAR }
 
-    fun newLineError() {
+    private fun newLineError() {
         System.err.println()
     }
 

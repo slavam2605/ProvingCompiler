@@ -154,11 +154,11 @@ class CompareEqualitySets {
         }
     }
 
-    private fun dfsIsReachable(from: Int, to: Int, isStrict: Boolean, visited: MutableSet<Int>): Boolean {
+    private fun dfsIsReachable(from: Int, to: Int, isStrictNeeded: Boolean, visited: MutableSet<Int>): Boolean {
         if (from == to) {
-            // If isStrict and "visited" is empty, then
-            // `from == to` from the start, and `from < to` is false
-            return !isStrict || visited.isNotEmpty()
+            // isStrictNeeded must be false at this point
+            // Either it was not needed from the beginning, or we already met a '<' on the way here
+            return !isStrictNeeded
         }
 
         if (from in visited)
@@ -166,8 +166,9 @@ class CompareEqualitySets {
 
         visited.add(from)
         lessGraph[from]?.forEach { edge ->
-            if (isStrict && !edge.isStrict) return@forEach
-            if (dfsIsReachable(edge.toIndex, to, isStrict, visited))
+            // '<' is still needed if "it was needed" and "this edge is not strict"
+            val isStrictStillNeeded = isStrictNeeded && !edge.isStrict
+            if (dfsIsReachable(edge.toIndex, to, isStrictStillNeeded, visited))
                 return true
         }
 

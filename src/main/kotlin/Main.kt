@@ -17,7 +17,6 @@ fun main() {
 
     // TODO support functions
     // TODO support contracts for arguments and return values like #{ $ <= a; $ <= b; }
-    // TODO support modus ponens and logic axioms
     // TODO support compilation
 
     val value = LanguageParser.parse(input) ?: return

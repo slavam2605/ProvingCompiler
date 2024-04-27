@@ -15,9 +15,14 @@ sealed class AstNode(val offset: Int) {
     class ContextKey<@Suppress("unused") T>(val key: String)
 }
 
-sealed class ExprNode(offset: Int) : AstNode(offset)
+sealed class ExprNode(offset: Int) : AstNode(offset), ProofElement
 sealed class StatementNode(offset: Int) : AstNode(offset)
 sealed class TypeExprNode(offset: Int) : AstNode(offset)
+interface ProofElement
+
+// =============== Proofs ===============
+
+class LetEqualsNode(val name: String, val expr: ExprNode, val nameOffset: Int, offset: Int) : AstNode(offset), ProofElement
 
 // =============== Expressions ===============
 
@@ -38,8 +43,7 @@ class CompareNode(val left: ExprNode, val right: ExprNode, val op: CompareOp, of
             LE -> GE
             GT -> LT
             GE -> LE
-            EQ -> EQ
-            NEQ -> NEQ
+            EQ, NEQ -> this
         }
 
         fun negate(): CompareOp = when (this) {
@@ -51,9 +55,17 @@ class CompareNode(val left: ExprNode, val right: ExprNode, val op: CompareOp, of
             NEQ -> EQ
         }
 
+        fun weaken(): CompareOp? = when (this) {
+            LT -> LE
+            GT -> GE
+            LE, GE, EQ, NEQ -> null
+        }
+
         override fun toString() = str
     }
 }
+
+class ArrowNode(val left: ExprNode, val right: ExprNode, offset: Int) : ExprNode(offset)
 
 class OrNode(val left: ExprNode, val right: ExprNode, offset: Int) : ExprNode(offset)
 
@@ -79,7 +91,7 @@ class ReturnNode(val expr: ExprNode, offset: Int) : StatementNode(offset)
 
 class BlockNode(val lines: List<StatementNode>, offset: Int) : StatementNode(offset)
 
-class ProofBlockNode(val exprList: List<ExprNode>, offset: Int) : StatementNode(offset)
+class ProofBlockNode(val exprList: List<ProofElement>, offset: Int) : StatementNode(offset)
 
 class CompilerCommandNode(val name: String, offset: Int) : StatementNode(offset)
 

@@ -11,7 +11,7 @@ object LanguageParser {
         init {
             regexToken("\\s+", ignored = true)
             regexToken("//[^\n\r]*", ignored = true)
-            regexToken("/\\*([^*]|\\*)*?\\*/", ignored = true)
+            regexToken("/\\*(?s:.)*?\\*/", ignored = true)
         }
 
         val ifKeyword by keyword("if")
@@ -35,7 +35,7 @@ object LanguageParser {
         val eq by literalToken("==")
         val neq by literalToken("!=")
         val plus by literalToken("+")
-        val minus by literalToken("-")
+        val minus by literalToken("-(?!>)")
         val star by literalToken("*")
         val slash by literalToken("/")
         val assign by literalToken("=")
@@ -44,6 +44,8 @@ object LanguageParser {
         val and by literalToken("&&")
         val or by literalToken("||")
         val hash by literalToken("#")
+        val arrow by literalToken("->")
+        val letEquals by literalToken(":=")
 
         val addSubOp by (plus map { ArithmeticNode.ArithmeticOp.ADD }) or
                 (minus map { ArithmeticNode.ArithmeticOp.SUB })
@@ -65,15 +67,16 @@ object LanguageParser {
         val nameExpr by id map { NameNode(it.text, it.offset) }
         val bracedExpr by -leftPar * ref(::expr) * -rightPar
         val term by bracedExpr or boolExpr or intExpr or nameExpr
-        val notExpr by (excl * term map { NotNode(it.second, it.first.offset) }) or term
+        val notExpr: Parser<ExprNode> by (excl * ref(::notExpr) map { NotNode(it.second, it.first.offset) }) or term
 
         val mulDivExpr by leftAssociative(notExpr, mulDivOp) { l, op, r -> ArithmeticNode(l, r, op, l.offset) }
         val addSubExpr by leftAssociative(mulDivExpr, addSubOp) { l, op, r -> ArithmeticNode(l, r, op, l.offset) }
         val compareExpr by leftAssociative(addSubExpr, compareOp) { l, op, r -> CompareNode(l, r, op, l.offset) }
         val andExpr by leftAssociative(compareExpr, and) { l, _, r -> AndNode(l, r, l.offset) }
         val orExpr by leftAssociative(andExpr, or) { l, _, r -> OrNode(l, r, l.offset) }
+        val arrowExpr by rightAssociative(orExpr, arrow) { l, _, r -> ArrowNode(l, r, l.offset) }
 
-        val expr: Parser<ExprNode> by orExpr
+        val expr: Parser<ExprNode> by arrowExpr
 
         val ifStatement by parser {
             val offset = ifKeyword().offset
@@ -115,8 +118,14 @@ object LanguageParser {
             AssignNode(name, expr, name.offset)
         }
 
-        val proofBlock by hash * leftBrace * zeroOrMore(expr * semicolon) * rightBrace map {
-            ProofBlockNode(it.t3.map { p -> p.t1 }, it.t1.offset)
+        val letProofStatement by letKeyword * id * letEquals * expr * semicolon map {
+            LetEqualsNode(it.t2.text, it.t4, it.t2.offset, it.t1.offset)
+        }
+
+        val proofElement: Parser<ProofElement> by letProofStatement or (expr * semicolon map { it.first })
+
+        val proofBlock by hash * leftBrace * zeroOrMore(proofElement) * rightBrace map {
+            ProofBlockNode(it.t3, it.t1.offset)
         }
 
         val compilerCommand by hash * id map { CompilerCommandNode(it.t2.text, it.t1.offset) }

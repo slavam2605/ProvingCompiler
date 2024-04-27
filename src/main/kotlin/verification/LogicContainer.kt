@@ -33,17 +33,26 @@ class LogicContainer(private val compilerMessagePrinter: CompilerMessagePrinter)
         trueList.forEach { addToSet(it, noSplit = false) }
     }
 
-    fun verifyProofAndCollect(list: List<ExprNode>) {
+    fun verifyProofAndCollect(list: List<ProofElement>) {
         val verifier = ProofVerifier(Collections.unmodifiableList(trueList), compareEqualitySets)
-        val logicList = list.map { LogicExpr.fromAstNotNull(it) { return } }
-        logicList.forEachIndexed { index, logicExpr ->
-            if (!verifier.verifyExpr(logicExpr)) {
-                compilerMessagePrinter.printError(list[index].offset, "Failed to prove the proof element", "here")
-                return
-            }
+        val logicList = list.map { (it as? ExprNode)?.let { e -> LogicExpr.fromAst(e) } }
+        logicList.forEachIndexed { index, proofElement ->
+            when {
+                proofElement!= null -> {
+                    val expr = verifier.verifyExpr(proofElement)
+                    if (expr == null) {
+                        compilerMessagePrinter.printError((list[index] as AstNode).offset, "Failed to prove the proof element", "here")
+                        return
+                    }
 
-            // Don't split provided expressions, they may be needed later
-            addTrue(logicExpr, noSplit = true)
+                    // Don't split provided expressions, they may be needed later
+                    addTrue(expr, noSplit = true)
+                }
+                else -> {
+                    val letEqualsNode = list[index] as LetEqualsNode
+                    verifier.addLetAlias(letEqualsNode.name, LogicExpr.fromAstNotNull(letEqualsNode.expr) { return })
+                }
+            }
         }
     }
 
@@ -87,10 +96,11 @@ class LogicContainer(private val compilerMessagePrinter: CompilerMessagePrinter)
             }
 
             // Merge remaining expressions
-            result.trueList.add(LogicOr(
+            val mergedTrueList = LogicOr(
                 left.trueList.reduce { acc, next -> LogicAnd(acc, next) },
                 right.trueList.reduce { acc, next -> LogicAnd(acc, next) }
-            ))
+            )
+            splitTransformExpr(simplifyExpr(mergedTrueList)) { result.trueList.add(it) }
 
             // Merge compare-equality sets
             result.compareEqualitySets.replaceWithMerge(left.compareEqualitySets, right.compareEqualitySets)
@@ -134,6 +144,67 @@ class LogicContainer(private val compilerMessagePrinter: CompilerMessagePrinter)
 
             block(expr)
         }
+
+        /**
+         * Simplifies `expr` using simple rules like `false && a -> false`
+         */
+        private fun simplifyExpr(expr: LogicExpr): LogicExpr {
+            val children = expr.children.map { simplifyExpr(it) }
+            return when (expr) {
+                is LogicArrow -> {
+                    val (left, right) = children
+                    when {
+                        left is LogicBool && left.value -> right
+                        left is LogicBool && !left.value -> LogicBool(true)
+                        right is LogicBool && right.value -> LogicBool(true)
+                        right is LogicBool && !right.value -> LogicNot(left)
+                        else -> LogicArrow(left, right)
+                    }
+                }
+                is LogicAnd -> {
+                    val (left, right) = children
+                    when {
+                        left is LogicBool && left.value -> right
+                        left is LogicBool && !left.value -> LogicBool(false)
+                        right is LogicBool && right.value -> left
+                        right is LogicBool && !right.value -> LogicBool(false)
+                        else -> LogicAnd(left, right)
+                    }
+                }
+                is LogicOr -> {
+                    val (left, right) = children
+                    when {
+                        left is LogicBool && left.value -> LogicBool(true)
+                        left is LogicBool && !left.value -> right
+                        right is LogicBool && right.value -> LogicBool(true)
+                        right is LogicBool && !right.value -> left
+                        else -> LogicOr(left, right)
+                    }
+                }
+                is LogicArithmetic -> {
+                    val (left, right) = children
+                    LogicArithmetic(left, right, expr.op)
+                }
+                is LogicCompare -> {
+                    val (left, right) = children
+                    LogicCompare(left, right, expr.op)
+                }
+                is LogicNot -> {
+                    val (child) = children
+                    when (child) {
+                        is LogicNot -> child.expr
+                        is LogicBool -> LogicBool(!child.value)
+                        else -> LogicNot(child)
+                    }
+                }
+                else -> {
+                    if (children.isNotEmpty()) {
+                        error("simplifyExpr must handle all logic nodes with children")
+                    }
+                    expr
+                }
+            }
+        }
     }
 }
 
@@ -174,6 +245,11 @@ sealed class LogicExpr(private val precedence: Int, vararg val children: LogicEx
                     val left = fromAst(node.left) ?: return null
                     val right = fromAst(node.right) ?: return null
                     LogicCompare(left, right, node.op)
+                }
+                is ArrowNode -> {
+                    val left = fromAst(node.left) ?: return null
+                    val right = fromAst(node.right) ?: return null
+                    LogicArrow(left, right)
                 }
                 is OrNode -> {
                     val left = fromAst(node.left) ?: return null
@@ -265,6 +341,18 @@ class LogicNot(val expr: LogicExpr) : LogicExpr(100, expr) {
     }
 
     override fun toString() = "!${par(expr)}"
+}
+
+class LogicArrow(val left: LogicExpr, val right: LogicExpr) : LogicExpr(-10, left, right) {
+    override fun equals(other: Any?): Boolean {
+        return other is LogicArrow && left == other.left && right == other.right
+    }
+
+    override fun hashCode(): Int {
+        return Objects.hash(LogicArrow::class.java, left, right)
+    }
+
+    override fun toString() = "${par(left)} -> ${par(right)}"
 }
 
 class LogicOr(val left: LogicExpr, val right: LogicExpr) : LogicExpr(0, left, right) {
