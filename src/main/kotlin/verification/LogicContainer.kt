@@ -4,8 +4,8 @@ import org.example.*
 import java.util.*
 
 class LogicContainer(private val compilerMessagePrinter: CompilerMessagePrinter) {
-    private val trueList = mutableListOf<LogicExpr>()
-    private val compareEqualitySets = CompareEqualitySets()
+    internal val trueList = mutableListOf<LogicExpr>()
+    internal val compareEqualitySets = CompareEqualitySets()
 
     fun addTrue(expr: LogicExpr, noSplit: Boolean = false) {
         trueList.add(expr)
@@ -33,14 +33,22 @@ class LogicContainer(private val compilerMessagePrinter: CompilerMessagePrinter)
         trueList.forEach { addToSet(it, noSplit = false) }
     }
 
-    fun verifyProofAndCollect(list: List<ProofElement>) {
-        val verifier = ProofVerifier(Collections.unmodifiableList(trueList), compareEqualitySets)
+    /**
+     * If [skipVerification] is true, then assume that all elements are true and just add them
+     */
+    fun verifyProofAndCollect(list: List<ProofElement>, skipVerification: Boolean) {
+        val verifier = ProofVerifier(this)
+        val letAliases = mutableMapOf<String, LogicExpr>()
+        fun replaceAliases(expr: LogicExpr) = expr.transform {
+            ((expr as? LogicVar)?.symbol as? LanguageResolver.ResolvedSymbol.LetAlias)?.let { letAliases[it.name] }
+        }
+
         val logicList = list.map { (it as? ExprNode)?.let { e -> LogicExpr.fromAst(e) } }
         logicList.forEachIndexed { index, proofElement ->
             when {
-                proofElement!= null -> {
-                    val expr = verifier.verifyExpr(proofElement)
-                    if (expr == null) {
+                proofElement != null -> {
+                    val expr = replaceAliases(proofElement)
+                    if (!skipVerification && !verifier.verifyExpr(expr)) {
                         compilerMessagePrinter.printError((list[index] as AstNode).offset, "Failed to prove the proof element", "here")
                         return
                     }
@@ -50,8 +58,74 @@ class LogicContainer(private val compilerMessagePrinter: CompilerMessagePrinter)
                 }
                 else -> {
                     val letEqualsNode = list[index] as LetEqualsNode
-                    verifier.addLetAlias(letEqualsNode.name, LogicExpr.fromAstNotNull(letEqualsNode.expr) { return })
+                    letAliases[letEqualsNode.name] = LogicExpr.fromAstNotNull(letEqualsNode.expr) { return }
                 }
+            }
+        }
+    }
+
+    /**
+     * Simplifies `expr` using simple rules like `false && a -> false`
+     * and constant info from equality sets
+     */
+    internal fun simplifyExpr(expr: LogicExpr): LogicExpr {
+        compareEqualitySets.getExprRange(expr).boolValue?.let {
+            return LogicBool(it)
+        }
+
+        val children = expr.children.map { simplifyExpr(it) }
+        return when (expr) {
+            is LogicArrow -> {
+                val (left, right) = children
+                when {
+                    left is LogicBool && left.value -> right
+                    left is LogicBool && !left.value -> LogicBool(true)
+                    right is LogicBool && right.value -> LogicBool(true)
+                    right is LogicBool && !right.value -> LogicNot(left)
+                    else -> LogicArrow(left, right)
+                }
+            }
+            is LogicAnd -> {
+                val (left, right) = children
+                when {
+                    left is LogicBool && left.value -> right
+                    left is LogicBool && !left.value -> LogicBool(false)
+                    right is LogicBool && right.value -> left
+                    right is LogicBool && !right.value -> LogicBool(false)
+                    else -> LogicAnd(left, right)
+                }
+            }
+            is LogicOr -> {
+                val (left, right) = children
+                when {
+                    left is LogicBool && left.value -> LogicBool(true)
+                    left is LogicBool && !left.value -> right
+                    right is LogicBool && right.value -> LogicBool(true)
+                    right is LogicBool && !right.value -> left
+                    else -> LogicOr(left, right)
+                }
+            }
+            is LogicArithmetic -> {
+                val (left, right) = children
+                LogicArithmetic(left, right, expr.op)
+            }
+            is LogicCompare -> {
+                val (left, right) = children
+                LogicCompare(left, right, expr.op)
+            }
+            is LogicNot -> {
+                val (child) = children
+                when (child) {
+                    is LogicNot -> child.expr
+                    is LogicBool -> LogicBool(!child.value)
+                    else -> LogicNot(child)
+                }
+            }
+            else -> {
+                if (children.isNotEmpty()) {
+                    error("simplifyExpr must handle all logic nodes with children")
+                }
+                expr
             }
         }
     }
@@ -75,6 +149,12 @@ class LogicContainer(private val compilerMessagePrinter: CompilerMessagePrinter)
 
     companion object {
         fun merge(left: LogicContainer, right: LogicContainer): LogicContainer {
+            if (left.trueList.contains(LogicBool(false)))
+                return right
+
+            if (right.trueList.contains(LogicBool(false)))
+                return left
+
             val result = LogicContainer(left.compilerMessagePrinter)
 
             // Filter out common expressions
@@ -95,15 +175,15 @@ class LogicContainer(private val compilerMessagePrinter: CompilerMessagePrinter)
                 }
             }
 
+            // Merge compare-equality sets
+            result.compareEqualitySets.replaceWithMerge(left.compareEqualitySets, right.compareEqualitySets)
+
             // Merge remaining expressions
             val mergedTrueList = LogicOr(
                 left.trueList.reduce { acc, next -> LogicAnd(acc, next) },
                 right.trueList.reduce { acc, next -> LogicAnd(acc, next) }
             )
-            splitTransformExpr(simplifyExpr(mergedTrueList)) { result.trueList.add(it) }
-
-            // Merge compare-equality sets
-            result.compareEqualitySets.replaceWithMerge(left.compareEqualitySets, right.compareEqualitySets)
+            splitTransformExpr(result.simplifyExpr(mergedTrueList)) { result.trueList.add(it) }
 
             return result
         }
@@ -143,67 +223,6 @@ class LogicContainer(private val compilerMessagePrinter: CompilerMessagePrinter)
             }
 
             block(expr)
-        }
-
-        /**
-         * Simplifies `expr` using simple rules like `false && a -> false`
-         */
-        private fun simplifyExpr(expr: LogicExpr): LogicExpr {
-            val children = expr.children.map { simplifyExpr(it) }
-            return when (expr) {
-                is LogicArrow -> {
-                    val (left, right) = children
-                    when {
-                        left is LogicBool && left.value -> right
-                        left is LogicBool && !left.value -> LogicBool(true)
-                        right is LogicBool && right.value -> LogicBool(true)
-                        right is LogicBool && !right.value -> LogicNot(left)
-                        else -> LogicArrow(left, right)
-                    }
-                }
-                is LogicAnd -> {
-                    val (left, right) = children
-                    when {
-                        left is LogicBool && left.value -> right
-                        left is LogicBool && !left.value -> LogicBool(false)
-                        right is LogicBool && right.value -> left
-                        right is LogicBool && !right.value -> LogicBool(false)
-                        else -> LogicAnd(left, right)
-                    }
-                }
-                is LogicOr -> {
-                    val (left, right) = children
-                    when {
-                        left is LogicBool && left.value -> LogicBool(true)
-                        left is LogicBool && !left.value -> right
-                        right is LogicBool && right.value -> LogicBool(true)
-                        right is LogicBool && !right.value -> left
-                        else -> LogicOr(left, right)
-                    }
-                }
-                is LogicArithmetic -> {
-                    val (left, right) = children
-                    LogicArithmetic(left, right, expr.op)
-                }
-                is LogicCompare -> {
-                    val (left, right) = children
-                    LogicCompare(left, right, expr.op)
-                }
-                is LogicNot -> {
-                    val (child) = children
-                    when (child) {
-                        is LogicNot -> child.expr
-                        is LogicBool -> LogicBool(!child.value)
-                        else -> LogicNot(child)
-                    }
-                }
-                else -> {
-                    if (children.isNotEmpty()) {
-                        error("simplifyExpr must handle all logic nodes with children")
-                    }
-                    expr
-                }
-            }
         }
     }
 }
@@ -409,4 +428,17 @@ class LogicArithmetic(val left: LogicExpr, val right: LogicExpr, val op: Arithme
     }
 
     override fun toString() = "${par(left)} $op ${par(right)}"
+}
+
+fun LogicExpr.transform(block: (LogicExpr) -> LogicExpr?): LogicExpr {
+    block(this)?.let { return it }
+    return when (this) {
+        is LogicArrow -> LogicArrow(left.transform(block), right.transform(block))
+        is LogicOr -> LogicOr(left.transform(block), right.transform(block))
+        is LogicAnd -> LogicAnd(left.transform(block), right.transform(block))
+        is LogicCompare -> LogicCompare(left.transform(block), right.transform(block), op)
+        is LogicArithmetic -> LogicArithmetic(left.transform(block), right.transform(block), op)
+        is LogicNot -> LogicNot(expr.transform(block))
+        is LogicVar, is LogicInt, is LogicBool -> this
+    }
 }

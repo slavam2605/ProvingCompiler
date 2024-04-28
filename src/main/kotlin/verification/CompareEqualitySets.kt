@@ -1,6 +1,6 @@
 package org.example.verification
 
-import org.example.CompareNode
+import org.example.CompareNode.CompareOp
 
 class CompareEqualitySets {
     private val equalitySets = mutableListOf<ExprSetWithRange>()
@@ -11,18 +11,22 @@ class CompareEqualitySets {
             return
 
         if (expr.left is LogicInt || expr.right is LogicInt) {
-            return addConstExpr(expr)
+            return addConstIntExpr(expr)
+        }
+
+        if (expr.left is LogicBool || expr.right is LogicBool) {
+            return addConstBoolExpr(expr)
         }
 
         val leftIndex = getOrCreateIndex(expr.left)
         val rightIndex = getOrCreateIndex(expr.right)
         when (expr.op) {
-            CompareNode.CompareOp.EQ -> merge(leftIndex, rightIndex)
-            CompareNode.CompareOp.LT -> addLessEdge(leftIndex, rightIndex, true)
-            CompareNode.CompareOp.LE -> addLessEdge(leftIndex, rightIndex, false)
-            CompareNode.CompareOp.GT -> addLessEdge(rightIndex, leftIndex, true)
-            CompareNode.CompareOp.GE -> addLessEdge(rightIndex, leftIndex, false)
-            CompareNode.CompareOp.NEQ -> { /* No useful information */ }
+            CompareOp.EQ -> merge(leftIndex, rightIndex)
+            CompareOp.LT -> addLessEdge(leftIndex, rightIndex, true)
+            CompareOp.LE -> addLessEdge(leftIndex, rightIndex, false)
+            CompareOp.GT -> addLessEdge(rightIndex, leftIndex, true)
+            CompareOp.GE -> addLessEdge(rightIndex, leftIndex, false)
+            CompareOp.NEQ -> { /* No useful information */ }
         }
     }
 
@@ -35,12 +39,12 @@ class CompareEqualitySets {
         if (expr !is LogicCompare)
             return false
 
-        if (expr.op == CompareNode.CompareOp.EQ) return areEqual(expr.left, expr.right)
-        if (expr.op == CompareNode.CompareOp.NEQ) return areNotEqual(expr.left, expr.right)
-        if (expr.op == CompareNode.CompareOp.LT) return areLess(expr.left, expr.right, true)
-        if (expr.op == CompareNode.CompareOp.LE) return areLess(expr.left, expr.right, false)
-        if (expr.op == CompareNode.CompareOp.GT) return areLess(expr.right, expr.left, true)
-        if (expr.op == CompareNode.CompareOp.GE) return areLess(expr.right, expr.left, false)
+        if (expr.op == CompareOp.EQ) return areEqual(expr.left, expr.right)
+        if (expr.op == CompareOp.NEQ) return areNotEqual(expr.left, expr.right)
+        if (expr.op == CompareOp.LT) return areLess(expr.left, expr.right, true)
+        if (expr.op == CompareOp.LE) return areLess(expr.left, expr.right, false)
+        if (expr.op == CompareOp.GT) return areLess(expr.right, expr.left, true)
+        if (expr.op == CompareOp.GE) return areLess(expr.right, expr.left, false)
 
         return false
     }
@@ -175,7 +179,21 @@ class CompareEqualitySets {
         return false
     }
 
-    private fun addConstExpr(compareExpr: LogicCompare) {
+    private fun addConstBoolExpr(compareExpr: LogicCompare) {
+        val (expr, boolValue) = if (compareExpr.right is LogicBool)
+            compareExpr.left to compareExpr.right.value
+        else
+            compareExpr.right to (compareExpr.left as LogicBool).value
+
+        val index = getOrCreateIndex(expr)
+        when (compareExpr.op) {
+            CompareOp.EQ -> equalitySets[index].range = ValueRange.exact(boolValue)
+            CompareOp.NEQ -> equalitySets[index].range = ValueRange.exact(!boolValue)
+            else -> error("Bool values can only be compared with == and !=")
+        }
+    }
+
+    private fun addConstIntExpr(compareExpr: LogicCompare) {
         if (compareExpr.left is LogicInt && compareExpr.right is LogicInt)
             return
 
@@ -186,11 +204,11 @@ class CompareEqualitySets {
 
         val index = getOrCreateIndex(expr)
         when (op) {
-            CompareNode.CompareOp.EQ -> equalitySets[index].range = ValueRange.exact(intValue)
-            CompareNode.CompareOp.LE -> equalitySets[index].range = equalitySets[index].range.intersect(ValueRange(null, intValue))
-            CompareNode.CompareOp.LT -> equalitySets[index].range = equalitySets[index].range.intersect(ValueRange(null, intValue - 1))
-            CompareNode.CompareOp.GE -> equalitySets[index].range = equalitySets[index].range.intersect(ValueRange(intValue, null))
-            CompareNode.CompareOp.GT -> equalitySets[index].range = equalitySets[index].range.intersect(ValueRange(intValue + 1, null))
+            CompareOp.EQ -> equalitySets[index].range = ValueRange.exact(intValue)
+            CompareOp.LE -> equalitySets[index].range = equalitySets[index].range.intersect(ValueRange.longRange(null, intValue))
+            CompareOp.LT -> equalitySets[index].range = equalitySets[index].range.intersect(ValueRange.longRange(null, intValue - 1))
+            CompareOp.GE -> equalitySets[index].range = equalitySets[index].range.intersect(ValueRange.longRange(intValue, null))
+            CompareOp.GT -> equalitySets[index].range = equalitySets[index].range.intersect(ValueRange.longRange(intValue + 1, null))
             else -> {}
         }
     }
@@ -290,18 +308,25 @@ class CompareEqualitySets {
         }
     }
 
-    data class ValueRange(val from: Long?, val to: Long?) {
-        fun intersect(other: ValueRange) = ValueRange(
-            listOfNotNull(from, other.from).maxOrNull(),
-            listOfNotNull(to, other.to).minOrNull()
-        )
+    class ValueRange(val from: Long?, val to: Long?, val boolValue: Boolean?) {
+        fun intersect(other: ValueRange): ValueRange {
+            return ValueRange(
+                listOfNotNull(from, other.from).maxOrNull(),
+                listOfNotNull(to, other.to).minOrNull(),
+                boolValue.takeIf { boolValue == other.boolValue }
+            )
+        }
 
-        fun union(other: ValueRange) = ValueRange(
-            from?.let { sf -> other.from?.let { of -> minOf(sf, of) } },
-            to?.let { st -> other.to?.let { ot -> maxOf(st, ot) } }
-        )
+        fun union(other: ValueRange): ValueRange {
+            return ValueRange(
+                from?.let { sf -> other.from?.let { of -> minOf(sf, of) } },
+                to?.let { st -> other.to?.let { ot -> maxOf(st, ot) } },
+                boolValue.takeIf { boolValue == other.boolValue }
+            )
+        }
 
         fun forAllLess(other: ValueRange, isStrict: Boolean): Boolean {
+            check(boolValue == null)
             val selfTo = to ?: Long.MAX_VALUE
             val otherFrom = other.from ?: Long.MIN_VALUE
             return if (isStrict) {
@@ -312,6 +337,7 @@ class CompareEqualitySets {
         }
 
         fun forAllGreater(other: ValueRange, isStrict: Boolean): Boolean {
+            check(boolValue == null)
             val selfFrom: Long = from ?: Long.MIN_VALUE
             val otherTo: Long = other.to ?: Long.MAX_VALUE
             return if (isStrict) {
@@ -322,6 +348,7 @@ class CompareEqualitySets {
         }
 
         fun isDisjointWith(other: ValueRange): Boolean {
+            check(boolValue == null)
             return forAllLess(other, true) || forAllGreater(other, true)
         }
 
@@ -334,9 +361,12 @@ class CompareEqualitySets {
         }
 
         companion object {
-            val NullRange = ValueRange(null, null)
+            val NullRange = ValueRange(null, null, null)
 
-            fun exact(value: Long) = ValueRange(value, value)
+            fun exact(value: Long) = ValueRange(value, value, null)
+            fun exact(value: Boolean) = ValueRange(null, null, value)
+
+            fun longRange(from: Long?, to: Long?) = ValueRange(from, to, null)
         }
     }
 }

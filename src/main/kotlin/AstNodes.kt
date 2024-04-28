@@ -20,6 +20,13 @@ sealed class StatementNode(offset: Int) : AstNode(offset)
 sealed class TypeExprNode(offset: Int) : AstNode(offset)
 interface ProofElement
 
+class FunctionNode(val name: String, val contract: FunctionContract?, val arguments: List<ArgumentNode>,
+                   val returnType: TypeExprNode, val body: BlockNode, val nameOffset: Int, offset: Int) : AstNode(offset)
+
+class ArgumentNode(val name: String, val type: TypeExprNode, offset: Int) : AstNode(offset)
+
+class FunctionContract(val input: ProofBlockNode, val output: ProofBlockNode?, offset: Int) : AstNode(offset)
+
 // =============== Proofs ===============
 
 class LetEqualsNode(val name: String, val expr: ExprNode, val nameOffset: Int, offset: Int) : AstNode(offset), ProofElement
@@ -98,3 +105,18 @@ class CompilerCommandNode(val name: String, offset: Int) : StatementNode(offset)
 // =============== Type expressions ===============
 
 class TypeNameNode(val name: String, offset: Int) : TypeExprNode(offset)
+
+// =============== Utils ===============
+
+fun ExprNode.transform(block: (ExprNode) -> ExprNode?): ExprNode {
+    block(this)?.let { return it }
+    return when (this) {
+        is ArrowNode -> ArrowNode(left.transform(block), right.transform(block), offset)
+        is OrNode -> OrNode(left.transform(block), right.transform(block), offset)
+        is AndNode -> AndNode(left.transform(block), right.transform(block), offset)
+        is CompareNode -> CompareNode(left.transform(block), right.transform(block), op, offset)
+        is ArithmeticNode -> ArithmeticNode(left.transform(block), right.transform(block), op, offset)
+        is NotNode -> NotNode(expr.transform(block), offset)
+        is NameNode, is BoolNode, is IntNode -> this
+    }
+}

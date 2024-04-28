@@ -1,7 +1,28 @@
 package org.example
 
 class CompilerMessagePrinter(private val input: String) {
+    internal val contextStack = mutableListOf<LanguageResolver.ErrorContext>()
+
+    internal inline fun <T> withContext(context: LanguageResolver.ErrorContext, block: () -> T): T {
+        contextStack.add(context)
+        try {
+            return block()
+        } finally {
+            check(context === contextStack.removeLast())
+        }
+    }
+
     fun printError(offset: Int, error: String?, hint: String, last: Boolean = true) {
+        printBlock(offset, error, hint)
+        contextStack.asReversed().forEach { context ->
+            printBlock(context.offset, null, "from here")
+        }
+        if (last) {
+            newLineError()
+        }
+    }
+
+    private fun printBlock(offset: Int, error: String?, hint: String) {
         if (offset < 0) {
             System.err.println("error: $error")
             return
@@ -20,19 +41,22 @@ class CompilerMessagePrinter(private val input: String) {
         System.err.println(" \t|")
         System.err.println("${lineNumber + 1}\t|\t$line")
         System.err.println(" \t|\t${" ".repeat(col)}^ $hint")
-        if (last) {
-            newLineError()
-        }
     }
 
     fun printRedeclarationError(offset: Int, name: String, existingSymbol: LanguageResolver.ResolvedSymbol) {
-        printError(offset, "Variable '${name}' is already defined in this scope", "redeclaration", false)
+        printError(offset, "Symbol '${name}' is already defined in this scope", "redeclaration", false)
         when (existingSymbol) {
+            is LanguageResolver.ResolvedSymbol.Function -> {
+                printError(existingSymbol.node.nameOffset, null, "previous function declaration", false)
+            }
             is LanguageResolver.ResolvedSymbol.LocalVariable -> {
-                printError(existingSymbol.node.nameOffset, null, "previous declaration", false)
+                printError(existingSymbol.node.nameOffset, null, "previous variable declaration", false)
             }
             is LanguageResolver.ResolvedSymbol.LetAlias -> {
-                printError(existingSymbol.node.nameOffset, null, "previous declaration", false)
+                printError(existingSymbol.node.nameOffset, null, "previous proof-let declaration", false)
+            }
+            is LanguageResolver.ResolvedSymbol.FunctionArgument -> {
+                printError(existingSymbol.node.offset, null, "previous argument declaration", false)
             }
             is LanguageResolver.ResolvedSymbol.PatternName -> {
                 error("Unexpected symbol type: PatternName must only appear in axiom patterns")

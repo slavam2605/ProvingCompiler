@@ -1,16 +1,14 @@
 package org.example
 
 import org.example.AstNode.ContextKey
-import org.example.verification.LogicCompare
-import org.example.verification.LogicContainer
-import org.example.verification.LogicExpr
-import org.example.verification.LogicVar
+import org.example.verification.*
 import java.lang.NumberFormatException
 
 class LanguageResolver(private val input: String) {
     private val symbolMap = ScopeStack()
     private val compilerMessagePrinter = CompilerMessagePrinter(input)
     private var logicContainer = LogicContainer(compilerMessagePrinter)
+    private var currentFunction: ResolvedSymbol.Function? = null
 
     private inline fun withLogicContainer(newContainer: LogicContainer, block: () -> Unit): LogicContainer {
         val oldContainer = logicContainer
@@ -105,6 +103,12 @@ class LanguageResolver(private val input: String) {
     }
 
     private fun resolveName(node: NameNode): ResolvedType? {
+        if (node.name == "$") {
+            val symbol = node[ResolvedSymbol.key]
+            check(symbol != null)
+            return symbol.type
+        }
+
         val symbol = symbolMap[node.name]
         if (symbol == null) {
             compilerMessagePrinter.printError(node.offset, "Unknown symbol: '${node.name}'", "here")
@@ -147,7 +151,7 @@ class LanguageResolver(private val input: String) {
     private fun resolveLet(node: LetNode) {
         symbolMap[node.name]?.let { existingSymbol ->
             compilerMessagePrinter.printRedeclarationError(node.nameOffset, node.name, existingSymbol)
-            return
+            return // TODO: throw compilation exception, can be caught later
         }
 
         if (node.type == null && node.initExpr == null) {
@@ -189,13 +193,32 @@ class LanguageResolver(private val input: String) {
             LogicCompare(
             LogicExpr.fromAst(node.name) ?: return,
             LogicExpr.fromAst(node.expr) ?: return,
-            CompareNode.CompareOp.EQ
-        )
+            CompareNode.CompareOp.EQ)
         )
     }
 
     private fun resolveReturn(node: ReturnNode) {
         resolveExpr(node.expr)
+
+        val function = currentFunction
+        check(function != null)
+        function.node.contract?.output?.let { block ->
+            val replaceBlock = { expr: ExprNode ->
+                if (expr is NameNode && expr.name == "$") node.expr else null
+            }
+            val replacedList = block.exprList.map {
+                when (it) {
+                    is ExprNode -> it.transform(replaceBlock)
+                    is LetEqualsNode -> LetEqualsNode(it.name, it.expr.transform(replaceBlock), it.nameOffset, it.offset)
+                    else -> error("Unknown proof element: ${it.javaClass}")
+                }
+            }
+            compilerMessagePrinter.withContext(ErrorContext(node.offset)) {
+                resolveProofBlock(ProofBlockNode(replacedList, block.offset))
+            }
+        }
+
+        logicContainer.addTrue(LogicBool(false))
     }
 
     private fun resolveLetEquals(node: LetEqualsNode) {
@@ -209,7 +232,7 @@ class LanguageResolver(private val input: String) {
         symbolMap[node.name] = ResolvedSymbol.LetAlias(node.name, node, type)
     }
 
-    private fun resolveProofBlock(node: ProofBlockNode) {
+    private fun resolveProofBlock(node: ProofBlockNode, skipVerification: Boolean = false) {
         symbolMap.withScope {
             node.exprList.forEach {
                 when (it) {
@@ -220,7 +243,7 @@ class LanguageResolver(private val input: String) {
             }
         }
 
-        logicContainer.verifyProofAndCollect(node.exprList)
+        logicContainer.verifyProofAndCollect(node.exprList, skipVerification = skipVerification)
     }
 
     private fun resolveCompilerCommand(node: CompilerCommandNode) {
@@ -232,7 +255,7 @@ class LanguageResolver(private val input: String) {
         logicContainer.printStatus(compilerMessagePrinter, node.offset)
     }
 
-    fun resolveBlock(node: BlockNode) {
+    private fun resolveBlock(node: BlockNode) {
         symbolMap.withScope {
             node.lines.forEach { statement ->
                 when (statement) {
@@ -243,8 +266,42 @@ class LanguageResolver(private val input: String) {
                     is ReturnNode -> resolveReturn(statement)
                     is ProofBlockNode -> resolveProofBlock(statement)
                     is CompilerCommandNode -> resolveCompilerCommand(statement)
-                }
+                }.let { /* Exhaustive check */ }
             }
+        }
+    }
+
+    private fun resolveFunction(node: FunctionNode) {
+        withLogicContainer(logicContainer.clone()) {
+            node.arguments.forEach {
+                val type = resolveType(it.type) ?: return@forEach
+                val symbol = ResolvedSymbol.FunctionArgument(it.name, it, type)
+                symbolMap[it.name] = symbol
+                it[ResolvedSymbol.key] = symbol
+            }
+
+            node.contract?.input?.let { inputContract ->
+                resolveProofBlock(inputContract, skipVerification = true)
+            }
+
+            val symbol = ResolvedSymbol.Function(node.name, node)
+            symbolMap[node.name] = symbol
+            try {
+                check(currentFunction == null)
+                currentFunction = symbol
+                resolveBlock(node.body)
+            } finally {
+                currentFunction = null
+            }
+        }
+    }
+
+    fun resolveFile(topLevel: List<FunctionNode>) {
+        // Create top-level file scope
+        symbolMap.pushScope()
+
+        topLevel.forEach {
+            resolveFunction(it)
         }
     }
 
@@ -258,6 +315,8 @@ class LanguageResolver(private val input: String) {
     private fun printErrorTypeMismatch(offset: Int, expected: ResolvedType, found: ResolvedType, hint: String) {
         compilerMessagePrinter.printError(offset, "Type mismatch: expected '$expected', found '$found'", hint)
     }
+
+    class ErrorContext(val offset: Int)
 
     class ScopeStack {
         private val symbolMap = mutableListOf<MutableMap<String, ResolvedSymbol>>()
@@ -292,6 +351,14 @@ class LanguageResolver(private val input: String) {
     }
 
     sealed class ResolvedSymbol(val type: ResolvedType) {
+        class Function(val name: String, val node: FunctionNode) : ResolvedSymbol(FunctionType(node)) {
+            override fun toString() = "function($name)"
+        }
+
+        class FunctionArgument(val name: String, val node: ArgumentNode, type: ResolvedType) : ResolvedSymbol(type) {
+            override fun toString() = "argument($name)"
+        }
+
         class LocalVariable(val name: String, val node: LetNode, val isMut: Boolean, type: ResolvedType) : ResolvedSymbol(type) {
 //            override fun toString() = "local($name)"
             // TODO return local() later
@@ -339,5 +406,9 @@ class LanguageResolver(private val input: String) {
 
     data object BoolType : ResolvedType() {
         override fun toString() = "bool"
+    }
+
+    class FunctionType(val node: FunctionNode) : ResolvedType() {
+        override fun toString() = "function"
     }
 }

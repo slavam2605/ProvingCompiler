@@ -16,9 +16,8 @@ fun main() {
     """.trimIndent()
 
     // TODO support functions
-    // TODO support contracts for arguments and return values like #{ $ <= a; $ <= b; }
     // TODO support compilation
 
     val value = LanguageParser.parse(input) ?: return
-    LanguageResolver(input).resolveBlock(value)
+    LanguageResolver(input).resolveFile(value)
 }

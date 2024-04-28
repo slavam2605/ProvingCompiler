@@ -7,7 +7,11 @@ import me.alllex.parsus.token.regexToken
 object LanguageParser {
     private fun Grammar<*>.keyword(name: String) = regexToken("$name\\b")
 
-    private val grammar = object : Grammar<BlockNode>() {
+    suspend fun <R> ParsingScope.parseRequired(p: Parser<R>): R {
+        return tryParse(p).getOrThrow()
+    }
+
+    private val grammar = object : Grammar<List<FunctionNode>>() {
         init {
             regexToken("\\s+", ignored = true)
             regexToken("//[^\n\r]*", ignored = true)
@@ -21,6 +25,7 @@ object LanguageParser {
         val mutKeyword by keyword("mut")
         val trueKeyword by keyword("true")
         val falseKeyword by keyword("false")
+        val funKeyword by keyword("fun")
         val id by regexToken("[a-zA-Z_][a-zA-Z0-9_]*")
         val int by regexToken("[0-9]+")
         val semicolon by literalToken(";")
@@ -46,6 +51,10 @@ object LanguageParser {
         val hash by literalToken("#")
         val arrow by literalToken("->")
         val letEquals by literalToken(":=")
+        val comma by literalToken(",")
+        val lsquare by literalToken("[")
+        val rsquare by literalToken("]")
+        val dollar by literalToken("$")
 
         val addSubOp by (plus map { ArithmeticNode.ArithmeticOp.ADD }) or
                 (minus map { ArithmeticNode.ArithmeticOp.SUB })
@@ -64,7 +73,7 @@ object LanguageParser {
 
         val boolExpr by (trueKeyword or falseKeyword) map { BoolNode(it.text, it.offset) }
         val intExpr by int map { IntNode(it.text, it.offset) }
-        val nameExpr by id map { NameNode(it.text, it.offset) }
+        val nameExpr by (id or dollar) map { NameNode(it.text, it.offset) }
         val bracedExpr by -leftPar * ref(::expr) * -rightPar
         val term by bracedExpr or boolExpr or intExpr or nameExpr
         val notExpr: Parser<ExprNode> by (excl * ref(::notExpr) map { NotNode(it.second, it.first.offset) }) or term
@@ -137,16 +146,55 @@ object LanguageParser {
                 proofBlock or
                 compilerCommand
 
-        override val root by zeroOrMore(statement) map { BlockNode(it, it.firstOrNull()?.offset ?: -1) }
+        val codeBlock = leftBrace * zeroOrMore(statement) * rightBrace map {
+            BlockNode(it.t2, it.t1.offset)
+        }
+
+        val functionArgument by id * colon * typeExpr map { ArgumentNode(it.t1.text, it.t3, it.t1.offset) }
+
+        val functionContract by parser(setOf(hash)) {
+            val offset = hash().offset
+            val inputOffset = lsquare().offset
+            val input = ProofBlockNode(zeroOrMore(proofElement)(), inputOffset)
+            rsquare()
+            val arrow = poll(arrow)
+            val output = arrow?.let {
+                val off = lsquare().offset
+                val o = zeroOrMore(proofElement)()
+                parseRequired(rsquare)
+                o to off
+            }?.let { ProofBlockNode(it.first, it.second) }
+            FunctionContract(input, output, offset)
+        }
+
+        val functionDeclaration by parser {
+            val contract = poll(functionContract)
+            val offset = funKeyword().offset
+            val name = id()
+            leftPar()
+            val arguments = separated(functionArgument, comma)()
+            rightPar()
+            colon()
+            val returnType = typeExpr()
+            val body = codeBlock()
+            FunctionNode(name.text, contract, arguments, returnType, body, name.offset, offset)
+        }
+
+        override val root by zeroOrMore(functionDeclaration)
     }
 
-    fun parse(input: String): BlockNode? {
-        return when (val result = grammar.parse(input)) {
-            is ParsedValue -> result.value
-            else -> {
-                System.err.println(result)
-                null
+    fun parse(input: String): List<FunctionNode>? {
+        try {
+            return when (val result = grammar.parse(input)) {
+                is ParsedValue -> result.value
+                else -> {
+                    System.err.println(result)
+                    null
+                }
             }
+        } catch (e: ParseException) {
+            System.err.println(e.error)
+            return null
         }
     }
 }

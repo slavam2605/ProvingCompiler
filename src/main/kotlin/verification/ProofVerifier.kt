@@ -3,18 +3,9 @@ package org.example.verification
 import org.example.CompareNode.CompareOp
 import org.example.LanguageResolver.ResolvedSymbol
 
-class ProofVerifier(
-    private val trueList: List<LogicExpr>,
-    private val compareEqualitySets: CompareEqualitySets
-) {
-    private val letAliases = mutableMapOf<String, LogicExpr>()
-
-    fun addLetAlias(name: String, expr: LogicExpr) {
-        letAliases[name] = expr
-    }
-
+class ProofVerifier(private val logicContainer: LogicContainer) {
     private fun areEqualWithEqualitySet(left: LogicExpr, right: LogicExpr): Boolean {
-        if (compareEqualitySets.areEqual(left, right))
+        if (logicContainer.compareEqualitySets.areEqual(left, right))
             return true
 
         if (!left.shallowEquals(right))
@@ -31,8 +22,13 @@ class ProofVerifier(
         return true
     }
 
+    private fun equalsTrue(expr: LogicExpr): Boolean {
+        val simplifiedExpr = logicContainer.simplifyExpr(expr)
+        return simplifiedExpr is LogicBool && simplifiedExpr.value
+    }
+
     private fun containsEqual(expr: LogicExpr): Boolean {
-        return trueList.any { areEqualWithEqualitySet(it, expr) }
+        return logicContainer.trueList.any { areEqualWithEqualitySet(it, expr) }
     }
 
     /**
@@ -84,7 +80,7 @@ class ProofVerifier(
     }
 
     private fun modusPonens(expr: LogicExpr): Boolean {
-        return trueList.any { trueExpr ->
+        return logicContainer.trueList.any { trueExpr ->
             if (trueExpr !is LogicArrow || !areEqualWithEqualitySet(trueExpr.right, expr))
                 return@any false
 
@@ -92,31 +88,15 @@ class ProofVerifier(
         }
     }
 
-    /**
-     * Verify expression and return it with all aliases resolved
-     */
-    fun verifyExpr(exprWithAliases: LogicExpr): LogicExpr? {
-        val expr = replaceAliases(exprWithAliases)
-        if (containsEqual(expr)) return expr                // a -> a, considering all equality sets
-        if (compareEqualitySets.isTrue(expr)) return expr   // verification with compare-equality sets
-        if (matchesAxiom(expr)) return expr                 // check with axioms
-        if (modusPonens(expr)) return expr                  // check with modus ponens
+    fun verifyExpr(expr: LogicExpr): Boolean {
+        if (equalsTrue(expr)) return true                   // a == true
+        if (containsEqual(expr)) return true                // a -> a, considering all equality sets
+        if (logicContainer.compareEqualitySets.isTrue(expr))
+            return true                                     // verification with compare-equality sets
+        if (matchesAxiom(expr)) return true                 // check with axioms
+        if (modusPonens(expr)) return true                  // check with modus ponens
 
-        return null
-    }
-
-    private fun replaceAliases(expr: LogicExpr): LogicExpr {
-        return when (expr) {
-            is LogicVar -> (expr.symbol as? ResolvedSymbol.LetAlias)?.let { letAliases[it.name] } ?: expr
-            is LogicAnd -> LogicAnd(replaceAliases(expr.left), replaceAliases(expr.right))
-            is LogicArithmetic -> LogicArithmetic(replaceAliases(expr.left), replaceAliases(expr.right), expr.op)
-            is LogicArrow -> LogicArrow(replaceAliases(expr.left), replaceAliases(expr.right))
-            is LogicCompare -> LogicCompare(replaceAliases(expr.left), replaceAliases(expr.right), expr.op)
-            is LogicNot -> LogicNot(replaceAliases(expr.expr))
-            is LogicOr -> LogicOr(replaceAliases(expr.left), replaceAliases(expr.right))
-            is LogicBool -> expr
-            is LogicInt -> expr
-        }
+        return false
     }
 
     companion object {
@@ -125,6 +105,9 @@ class ProofVerifier(
         private val c = LogicVar(ResolvedSymbol.PatternName("c"))
 
         private val axiomList: List<LogicExpr> = listOf(
+            // a -> b -> a
+            LogicArrow(a, LogicArrow(b, a)),
+
             // !(a && b) -> !a || !b
             LogicArrow(LogicNot(LogicAnd(a, b)), LogicOr(LogicNot(a), LogicNot(b))),
 
@@ -147,7 +130,10 @@ class ProofVerifier(
             LogicArrow(LogicArrow(a, b), LogicArrow(LogicArrow(a, c), LogicArrow(a, LogicAnd(b, c)))),
 
             // (a -> false) -> !a
-            LogicArrow(LogicArrow(a, LogicBool(false)), LogicNot(a))
+            LogicArrow(LogicArrow(a, LogicBool(false)), LogicNot(a)),
+
+            // a -> !a -> b
+            LogicArrow(a, LogicArrow(LogicNot(a), b))
         ) + createCompareAxioms()
 
         private fun createCompareAxioms(): List<LogicExpr> {
@@ -188,7 +174,6 @@ class ProofVerifier(
     }
     /**
      *  a -> a
-     *  a -> (b -> a)
      *  (a -> (b -> c)) -> ((a -> b) -> (a -> c))
      *  (!a -> !b) -> (b -> a)
      *  a; b -> a & b
