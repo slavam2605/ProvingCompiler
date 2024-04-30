@@ -80,6 +80,8 @@ class AndNode(val left: ExprNode, val right: ExprNode, offset: Int) : ExprNode(o
 
 class NotNode(val expr: ExprNode, offset: Int) : ExprNode(offset)
 
+class InvocationNode(val expr: ExprNode, val arguments: List<ExprNode>, offset: Int) : ExprNode(offset)
+
 class NameNode(val name: String, offset: Int) : ExprNode(offset)
 
 class IntNode(val value: String, offset: Int) : ExprNode(offset)
@@ -94,7 +96,7 @@ class LetNode(val name: String, val type: TypeExprNode?, val isMut: Boolean, val
 
 class IfNode(val cond: ExprNode, val trueBlock: BlockNode, val falseBlock: BlockNode?, offset: Int) : StatementNode(offset)
 
-class ReturnNode(val expr: ExprNode, offset: Int) : StatementNode(offset)
+class ReturnNode(val expr: ExprNode, val proofBlock: ProofBlockNode?, offset: Int) : StatementNode(offset)
 
 class BlockNode(val lines: List<StatementNode>, offset: Int) : StatementNode(offset)
 
@@ -117,6 +119,7 @@ fun ExprNode.transform(block: (ExprNode) -> ExprNode?): ExprNode {
         is CompareNode -> CompareNode(left.transform(block), right.transform(block), op, offset)
         is ArithmeticNode -> ArithmeticNode(left.transform(block), right.transform(block), op, offset)
         is NotNode -> NotNode(expr.transform(block), offset)
+        is InvocationNode -> InvocationNode(expr.transform(block), arguments.map { it.transform(block) }, offset)
         is NameNode, is BoolNode, is IntNode -> this
     }
 }

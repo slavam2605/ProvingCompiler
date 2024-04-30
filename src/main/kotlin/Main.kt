@@ -2,20 +2,45 @@ package org.example
 
 fun main() {
     val input = """
-        let a: int;
-        let x: int;
-        if a < 100 {
-            x = a;
-            #facts
-        } else {
-            x = 0;
-            #facts
+        #[] -> [$ -> a <= b;]
+        fun isLessOrEquals(a: int, b: int): bool {
+            if a <= b {
+                let x: bool = true;
+                #{
+                    a <= b -> x -> a <= b;
+                    a <= b;
+                    x -> a <= b;
+                }
+                return x;
+            }
+            let x: bool = false;
+            #{
+                !x;
+                !x -> !!x -> a <= b;
+                !!x -> a <= b;
+                x -> !!x;
+                (x -> !!x) -> (!!x -> a <= b) -> x -> a <= b;
+                (!!x -> a <= b) -> x -> a <= b;
+                x -> a <= b;
+            }
+            return x;
         }
-        #facts
-        #{ x != 50; }
+
+        #[] -> [$ -> a < b;]
+        fun isLess(a: int, b: int): bool {
+            if a == b {
+                return false;
+            }
+            return isLessOrEquals(a, b) -> #{
+                !(a == b) -> a <= b -> a < b;
+                a <= b -> a < b;
+                ($ -> a <= b) -> (a <= b -> a < b) -> $ -> a < b;
+                (a <= b -> a < b) -> $ -> a < b;
+                $ -> a < b;
+            };
+        }
     """.trimIndent()
 
-    // TODO support functions
     // TODO support compilation
 
     val value = LanguageParser.parse(input) ?: return

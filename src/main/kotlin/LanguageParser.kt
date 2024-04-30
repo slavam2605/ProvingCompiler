@@ -7,8 +7,13 @@ import me.alllex.parsus.token.regexToken
 object LanguageParser {
     private fun Grammar<*>.keyword(name: String) = regexToken("$name\\b")
 
-    suspend fun <R> ParsingScope.parseRequired(p: Parser<R>): R {
+    private suspend fun <R> ParsingScope.parseRequired(p: Parser<R>): R {
         return tryParse(p).getOrThrow()
+    }
+
+    private fun <R> Parser<R>.required(): Parser<R> {
+        val p = this
+        return parser { parseRequired(p) }
     }
 
     private val grammar = object : Grammar<List<FunctionNode>>() {
@@ -28,7 +33,7 @@ object LanguageParser {
         val funKeyword by keyword("fun")
         val id by regexToken("[a-zA-Z_][a-zA-Z0-9_]*")
         val int by regexToken("[0-9]+")
-        val semicolon by literalToken(";")
+        val semicolon by literalToken(";").required()
         val leftPar by literalToken("(")
         val rightPar by literalToken(")")
         val leftBrace by literalToken("{")
@@ -40,7 +45,7 @@ object LanguageParser {
         val eq by literalToken("==")
         val neq by literalToken("!=")
         val plus by literalToken("+")
-        val minus by literalToken("-(?!>)")
+        val minus by literalToken("-")
         val star by literalToken("*")
         val slash by literalToken("/")
         val assign by literalToken("=")
@@ -56,8 +61,27 @@ object LanguageParser {
         val rsquare by literalToken("]")
         val dollar by literalToken("$")
 
-        val addSubOp by (plus map { ArithmeticNode.ArithmeticOp.ADD }) or
-                (minus map { ArithmeticNode.ArithmeticOp.SUB })
+        // Tries to parse "-", but fails if it is "->"
+        val minusChecked by parser {
+            val offset = currentOffset
+            if (has(arrow)) {
+                fail(UnmatchedToken(minus, offset))
+            }
+            minus()
+            ArithmeticNode.ArithmeticOp.SUB
+        }
+
+        // Tries to parser "->", but fails if it is followed by "#"
+        val arrowChecked by parser {
+            val offset = currentOffset
+            val arr = arrow()
+            if (has(hash)) {
+                fail(UnmatchedToken(arrow, offset))
+            }
+            arr
+        }
+
+        val addSubOp by (plus map { ArithmeticNode.ArithmeticOp.ADD }) or minusChecked
 
         val mulDivOp by (star map { ArithmeticNode.ArithmeticOp.MUL }) or
                 (slash map { ArithmeticNode.ArithmeticOp.DIV })
@@ -75,7 +99,8 @@ object LanguageParser {
         val intExpr by int map { IntNode(it.text, it.offset) }
         val nameExpr by (id or dollar) map { NameNode(it.text, it.offset) }
         val bracedExpr by -leftPar * ref(::expr) * -rightPar
-        val term by bracedExpr or boolExpr or intExpr or nameExpr
+        val invocationExpr by nameExpr * leftPar * separated(ref(::expr), comma) * rightPar map { InvocationNode(it.t1, it.t3, it.t1.offset) }
+        val term by bracedExpr or boolExpr or intExpr or invocationExpr or nameExpr
         val notExpr: Parser<ExprNode> by (excl * ref(::notExpr) map { NotNode(it.second, it.first.offset) }) or term
 
         val mulDivExpr by leftAssociative(notExpr, mulDivOp) { l, op, r -> ArithmeticNode(l, r, op, l.offset) }
@@ -83,16 +108,16 @@ object LanguageParser {
         val compareExpr by leftAssociative(addSubExpr, compareOp) { l, op, r -> CompareNode(l, r, op, l.offset) }
         val andExpr by leftAssociative(compareExpr, and) { l, _, r -> AndNode(l, r, l.offset) }
         val orExpr by leftAssociative(andExpr, or) { l, _, r -> OrNode(l, r, l.offset) }
-        val arrowExpr by rightAssociative(orExpr, arrow) { l, _, r -> ArrowNode(l, r, l.offset) }
+        val arrowExpr by rightAssociative(orExpr, arrowChecked) { l, _, r -> ArrowNode(l, r, l.offset) }
 
         val expr: Parser<ExprNode> by arrowExpr
 
         val ifStatement by parser {
             val offset = ifKeyword().offset
             val cond = expr()
-            val trueOffset = leftBrace().offset
+            val trueOffset = (parseRequired(leftBrace)).offset
             val trueBlock = zeroOrMore(statement)()
-            rightBrace()
+            parseRequired(rightBrace)
             val falseBlock = poll(elseKeyword)?.let {
                 val falseOffset = leftBrace().offset
                 val lines = zeroOrMore(statement)()
@@ -105,8 +130,11 @@ object LanguageParser {
         val returnStatement by parser {
             val offset = returnKeyword().offset
             val expr = expr()
+            val block = if (has(arrow)) {
+                proofBlock()
+            } else null
             semicolon()
-            ReturnNode(expr, offset)
+            ReturnNode(expr, block, offset)
         }
 
         val letStatement by parser {

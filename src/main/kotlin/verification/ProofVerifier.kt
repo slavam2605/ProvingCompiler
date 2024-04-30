@@ -157,6 +157,14 @@ class ProofVerifier(private val logicContainer: LogicContainer) {
                 result.add(LogicArrow(LogicCompare(a, b, op), LogicCompare(b, a, flipOp)))
             }
 
+            // Enforce: !(a == b) -> a <= b -> a < b
+            for (op in allCompareOps) {
+                val weakOp = op.weaken() ?: continue
+                result.add(LogicArrow(LogicNot(LogicCompare(a, b, CompareOp.EQ)), LogicArrow(
+                    LogicCompare(a, b, weakOp), LogicCompare(a, b, op)
+                )))
+            }
+
             // a < b && a > b -> false
             result.add(LogicArrow(LogicAnd(LogicCompare(a, b, CompareOp.LT), LogicCompare(a, b, CompareOp.GT)), LogicBool(false)))
 

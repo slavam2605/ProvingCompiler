@@ -39,7 +39,7 @@ class LogicContainer(private val compilerMessagePrinter: CompilerMessagePrinter)
     fun verifyProofAndCollect(list: List<ProofElement>, skipVerification: Boolean) {
         val verifier = ProofVerifier(this)
         val letAliases = mutableMapOf<String, LogicExpr>()
-        fun replaceAliases(expr: LogicExpr) = expr.transform {
+        fun replaceAliases(expr: LogicExpr) = expr.replaceTree {
             ((expr as? LogicVar)?.symbol as? LanguageResolver.ResolvedSymbol.LetAlias)?.let { letAliases[it.name] }
         }
 
@@ -68,66 +68,50 @@ class LogicContainer(private val compilerMessagePrinter: CompilerMessagePrinter)
      * Simplifies `expr` using simple rules like `false && a -> false`
      * and constant info from equality sets
      */
-    internal fun simplifyExpr(expr: LogicExpr): LogicExpr {
+    internal fun simplifyExpr(originalExpr: LogicExpr) = originalExpr.recursiveTransform block@ { expr ->
         compareEqualitySets.getExprRange(expr).boolValue?.let {
-            return LogicBool(it)
+            return@block LogicBool(it)
         }
 
-        val children = expr.children.map { simplifyExpr(it) }
-        return when (expr) {
-            is LogicArrow -> {
-                val (left, right) = children
-                when {
-                    left is LogicBool && left.value -> right
-                    left is LogicBool && !left.value -> LogicBool(true)
-                    right is LogicBool && right.value -> LogicBool(true)
-                    right is LogicBool && !right.value -> LogicNot(left)
-                    else -> LogicArrow(left, right)
-                }
-            }
-            is LogicAnd -> {
-                val (left, right) = children
-                when {
-                    left is LogicBool && left.value -> right
-                    left is LogicBool && !left.value -> LogicBool(false)
-                    right is LogicBool && right.value -> left
-                    right is LogicBool && !right.value -> LogicBool(false)
-                    else -> LogicAnd(left, right)
-                }
-            }
-            is LogicOr -> {
-                val (left, right) = children
-                when {
-                    left is LogicBool && left.value -> LogicBool(true)
-                    left is LogicBool && !left.value -> right
-                    right is LogicBool && right.value -> LogicBool(true)
-                    right is LogicBool && !right.value -> left
-                    else -> LogicOr(left, right)
-                }
-            }
-            is LogicArithmetic -> {
-                val (left, right) = children
-                LogicArithmetic(left, right, expr.op)
-            }
-            is LogicCompare -> {
-                val (left, right) = children
-                LogicCompare(left, right, expr.op)
-            }
-            is LogicNot -> {
-                val (child) = children
-                when (child) {
-                    is LogicNot -> child.expr
-                    is LogicBool -> LogicBool(!child.value)
-                    else -> LogicNot(child)
-                }
-            }
-            else -> {
-                if (children.isNotEmpty()) {
-                    error("simplifyExpr must handle all logic nodes with children")
-                }
-                expr
+        val leftBool = (expr.children.getOrNull(0) as? LogicBool)?.value
+        val rightBool = (expr.children.getOrNull(1) as? LogicBool)?.value
+
+        if (expr is LogicArrow) {
+            when {
+                leftBool == true -> return@block expr.right
+                leftBool == false -> return@block LogicBool(true)
+                rightBool == true -> return@block LogicBool(true)
+                rightBool == false -> return@block LogicNot(expr.left)
             }
         }
+
+        if (expr is LogicAnd) {
+            when {
+                leftBool == true -> return@block expr.right
+                leftBool == false -> return@block LogicBool(false)
+                rightBool == true -> return@block expr.left
+                rightBool == false -> return@block LogicBool(false)
+            }
+        }
+
+        if (expr is LogicOr) {
+            when {
+                leftBool == true -> return@block LogicBool(true)
+                leftBool == false -> return@block expr.right
+                rightBool == true -> return@block LogicBool(true)
+                rightBool == false -> return@block expr.left
+            }
+        }
+
+        if (expr is LogicNot) {
+            leftBool?.let {
+                return@block LogicBool(!it)
+            }
+            if (expr.expr is LogicNot)
+                return@block expr.expr.expr
+        }
+
+        expr
     }
 
     fun clone(): LogicContainer {
@@ -255,6 +239,14 @@ sealed class LogicExpr(private val precedence: Int, vararg val children: LogicEx
     companion object {
         fun fromAst(node: ExprNode): LogicExpr? {
             return when (node) {
+                is InvocationNode -> {
+                    val symbol = node.expr[LanguageResolver.ResolvedSymbol.key]
+                            as? LanguageResolver.ResolvedSymbol.Function ?: return null
+                    val arguments = node.arguments.map {
+                        fromAst(it) ?: return null
+                    }
+                    LogicInvocation(symbol, arguments)
+                }
                 is ArithmeticNode -> {
                     val left = fromAst(node.left) ?: return null
                     val right = fromAst(node.right) ?: return null
@@ -306,6 +298,27 @@ sealed class LogicExpr(private val precedence: Int, vararg val children: LogicEx
             }
         }
     }
+}
+
+class LogicInvocation(
+    val symbol: LanguageResolver.ResolvedSymbol.Function,
+    val arguments: List<LogicExpr>
+) : LogicExpr(1000, *arguments.toTypedArray()) {
+    override fun shallowEquals(other: LogicExpr): Boolean {
+        return other is LogicInvocation && symbol === other.symbol
+    }
+
+    override fun equals(other: Any?): Boolean {
+        return other is LogicInvocation && symbol === other.symbol &&
+                arguments.size == other.arguments.size &&
+                arguments.zip(other.arguments).all { it.first == it.second }
+    }
+
+    override fun hashCode(): Int {
+        return Objects.hash(symbol, *children)
+    }
+
+    override fun toString() = "${symbol.name}(${arguments.joinToString { it.toString() }})"
 }
 
 class LogicBool(val value: Boolean) : LogicExpr(1000) {
@@ -430,15 +443,30 @@ class LogicArithmetic(val left: LogicExpr, val right: LogicExpr, val op: Arithme
     override fun toString() = "${par(left)} $op ${par(right)}"
 }
 
-fun LogicExpr.transform(block: (LogicExpr) -> LogicExpr?): LogicExpr {
-    block(this)?.let { return it }
-    return when (this) {
-        is LogicArrow -> LogicArrow(left.transform(block), right.transform(block))
-        is LogicOr -> LogicOr(left.transform(block), right.transform(block))
-        is LogicAnd -> LogicAnd(left.transform(block), right.transform(block))
-        is LogicCompare -> LogicCompare(left.transform(block), right.transform(block), op)
-        is LogicArithmetic -> LogicArithmetic(left.transform(block), right.transform(block), op)
-        is LogicNot -> LogicNot(expr.transform(block))
+/**
+ * Recursively traverse tree and call [block] for each node.
+ * If the result is not `null`, replace subtree with the result.
+ */
+fun LogicExpr.replaceTree(block: (LogicExpr) -> LogicExpr?): LogicExpr =
+    transformTwoStep(blockBefore = block, blockAfter = { it })
+
+/**
+ * Recursively traverse tree and replace each node with a result of [block].
+ */
+fun LogicExpr.recursiveTransform(block: (LogicExpr) -> LogicExpr): LogicExpr =
+    transformTwoStep(blockBefore = { null }, blockAfter = block)
+
+private fun LogicExpr.transformTwoStep(blockBefore: (LogicExpr) -> LogicExpr?, blockAfter: (LogicExpr) -> LogicExpr): LogicExpr {
+    blockBefore(this)?.let { return it }
+    val recursiveResult = when (this) {
+        is LogicInvocation -> LogicInvocation(symbol, arguments.map { it.transformTwoStep(blockBefore, blockAfter) })
+        is LogicArrow -> LogicArrow(left.transformTwoStep(blockBefore, blockAfter), right.transformTwoStep(blockBefore, blockAfter))
+        is LogicOr -> LogicOr(left.transformTwoStep(blockBefore, blockAfter), right.transformTwoStep(blockBefore, blockAfter))
+        is LogicAnd -> LogicAnd(left.transformTwoStep(blockBefore, blockAfter), right.transformTwoStep(blockBefore, blockAfter))
+        is LogicCompare -> LogicCompare(left.transformTwoStep(blockBefore, blockAfter), right.transformTwoStep(blockBefore, blockAfter), op)
+        is LogicArithmetic -> LogicArithmetic(left.transformTwoStep(blockBefore, blockAfter), right.transformTwoStep(blockBefore, blockAfter), op)
+        is LogicNot -> LogicNot(expr.transformTwoStep(blockBefore, blockAfter))
         is LogicVar, is LogicInt, is LogicBool -> this
     }
+    return blockAfter(recursiveResult)
 }

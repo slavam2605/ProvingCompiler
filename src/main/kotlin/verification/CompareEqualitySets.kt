@@ -308,7 +308,7 @@ class CompareEqualitySets {
         }
     }
 
-    class ValueRange(val from: Long?, val to: Long?, val boolValue: Boolean?) {
+    data class ValueRange(val from: Long?, val to: Long?, val boolValue: Boolean?) {
         fun intersect(other: ValueRange): ValueRange {
             return ValueRange(
                 listOfNotNull(from, other.from).maxOrNull(),
@@ -353,6 +353,7 @@ class CompareEqualitySets {
         }
 
         override fun toString() = when {
+            boolValue != null -> boolValue.toString()
             from == null && to == null -> "<empty>"
             from == to -> "$from"
             from != null && to != null -> "$from..$to"
