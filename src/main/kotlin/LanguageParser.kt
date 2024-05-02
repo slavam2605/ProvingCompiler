@@ -31,6 +31,7 @@ object LanguageParser {
         val trueKeyword by keyword("true")
         val falseKeyword by keyword("false")
         val funKeyword by keyword("fun")
+        val proofKeyword by keyword("proof")
         val id by regexToken("[a-zA-Z_][a-zA-Z0-9_]*")
         val int by regexToken("[0-9]+")
         val semicolon by literalToken(";").required()
@@ -159,7 +160,9 @@ object LanguageParser {
             LetEqualsNode(it.t2.text, it.t4, it.t2.offset, it.t1.offset)
         }
 
-        val proofElement: Parser<ProofElement> by letProofStatement or (expr * semicolon map { it.first })
+        val proofElement: Parser<ProofElement> by letProofStatement or
+                (expr * semicolon map { it.first }) or
+                ref(::proofFunction)
 
         val proofBlock by hash * leftBrace * zeroOrMore(proofElement) * rightBrace map {
             ProofBlockNode(it.t3, it.t1.offset)
@@ -183,12 +186,12 @@ object LanguageParser {
         val functionContract by parser(setOf(hash)) {
             val offset = hash().offset
             val inputOffset = lsquare().offset
-            val input = ProofBlockNode(zeroOrMore(proofElement)(), inputOffset)
+            val input = ProofBlockNode(separated(expr, comma)(), inputOffset)
             rsquare()
             val arrow = poll(arrow)
             val output = arrow?.let {
                 val off = lsquare().offset
-                val o = zeroOrMore(proofElement)()
+                val o = separated(expr, comma)()
                 parseRequired(rsquare)
                 o to off
             }?.let { ProofBlockNode(it.first, it.second) }
@@ -206,6 +209,19 @@ object LanguageParser {
             val returnType = typeExpr()
             val body = codeBlock()
             FunctionNode(name.text, contract, arguments, returnType, body, name.offset, offset)
+        }
+
+        val proofFunction by parser {
+            val contract = poll(functionContract)
+            val offset = proofKeyword().offset
+            val name = id()
+            leftPar()
+            val arguments = separated(functionArgument, comma)()
+            rightPar()
+            val blockOffset = leftBrace().offset
+            val elements = zeroOrMore(proofElement)()
+            rightBrace()
+            ProofFunctionNode(name.text, contract, arguments, ProofBlockNode(elements, blockOffset), name.offset, offset)
         }
 
         override val root by zeroOrMore(functionDeclaration)

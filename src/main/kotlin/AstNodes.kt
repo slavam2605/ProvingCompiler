@@ -31,6 +31,9 @@ class FunctionContract(val input: ProofBlockNode, val output: ProofBlockNode?, o
 
 class LetEqualsNode(val name: String, val expr: ExprNode, val nameOffset: Int, offset: Int) : AstNode(offset), ProofElement
 
+class ProofFunctionNode(val name: String, val contract: FunctionContract?, val arguments: List<ArgumentNode>,
+                        val body: ProofBlockNode, val nameOffset: Int, offset: Int) : AstNode(offset), ProofElement
+
 // =============== Expressions ===============
 
 class ArithmeticNode(val left: ExprNode, val right: ExprNode, val op: ArithmeticOp, offset: Int) : ExprNode(offset) {

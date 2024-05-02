@@ -79,12 +79,32 @@ class ProofVerifier(private val logicContainer: LogicContainer) {
         return true
     }
 
+    /**
+     * Tries to find true expression `a -> b -> ... -> z -> expr`, where all `a`, `b`, ..., `z` are true
+     */
     private fun modusPonens(expr: LogicExpr): Boolean {
+        fun splitArrowChain(expr: LogicArrow, target: LogicExpr): List<LogicExpr>? {
+            val list = mutableListOf<LogicExpr>()
+            var currentArrow = expr
+            while (true) {
+                list.add(currentArrow.left)
+                if (areEqualWithEqualitySet(currentArrow.right, target)) {
+                    return list
+                }
+                if (currentArrow.right is LogicArrow) {
+                    currentArrow = currentArrow.right as LogicArrow
+                    continue
+                }
+                return null
+            }
+        }
+
         return logicContainer.trueList.any { trueExpr ->
-            if (trueExpr !is LogicArrow || !areEqualWithEqualitySet(trueExpr.right, expr))
+            if (trueExpr !is LogicArrow)
                 return@any false
 
-            containsEqual(trueExpr.left)
+            val chain = splitArrowChain(trueExpr, expr) ?: return@any false
+            chain.all { containsEqual(it) }
         }
     }
 
@@ -105,17 +125,29 @@ class ProofVerifier(private val logicContainer: LogicContainer) {
         private val c = LogicVar(ResolvedSymbol.PatternName("c"))
 
         private val axiomList: List<LogicExpr> = listOf(
+            // a -> a
+            LogicArrow(a, a),
+
             // a -> b -> a
             LogicArrow(a, LogicArrow(b, a)),
 
+            // a -> b -> a && b
+            LogicArrow(a, LogicArrow(b, LogicAnd(a, b))),
+
             // !(a && b) -> !a || !b
             LogicArrow(LogicNot(LogicAnd(a, b)), LogicOr(LogicNot(a), LogicNot(b))),
+
+            // !a && !b -> !(a || b)
+            LogicArrow(LogicAnd(LogicNot(a), LogicNot(b)), LogicNot(LogicOr(a, b))),
 
             // a || b -> b || a
             LogicArrow(LogicOr(a, b), LogicOr(b, a)),
 
             // a || b -> !a -> b
             LogicArrow(LogicOr(a, b), LogicArrow(LogicNot(a), b)),
+
+            // !a -> b -> a || b;
+            LogicArrow(LogicNot(a), LogicArrow(b, LogicOr(a, b))),
 
             // a -> !!a
             LogicArrow(a, LogicNot(LogicNot(a))),
@@ -171,6 +203,12 @@ class ProofVerifier(private val logicContainer: LogicContainer) {
             // a > b && a < b -> false
             result.add(LogicArrow(LogicAnd(LogicCompare(a, b, CompareOp.GT), LogicCompare(a, b, CompareOp.LT)), LogicBool(false)))
 
+            // a < b && b < a -> false
+            result.add(LogicArrow(LogicAnd(LogicCompare(a, b, CompareOp.LT), LogicCompare(b, a, CompareOp.LT)), LogicBool(false)))
+
+            // a > b && b > a -> false
+            result.add(LogicArrow(LogicAnd(LogicCompare(a, b, CompareOp.GT), LogicCompare(b, a, CompareOp.GT)), LogicBool(false)))
+
             // a <= b && a >= b -> a == b
             result.add(LogicArrow(LogicAnd(LogicCompare(a, b, CompareOp.LE), LogicCompare(a, b, CompareOp.GE)), LogicCompare(a, b, CompareOp.EQ)))
 
@@ -181,7 +219,6 @@ class ProofVerifier(private val logicContainer: LogicContainer) {
         }
     }
     /**
-     *  a -> a
      *  (a -> (b -> c)) -> ((a -> b) -> (a -> c))
      *  (!a -> !b) -> (b -> a)
      *  a; b -> a & b

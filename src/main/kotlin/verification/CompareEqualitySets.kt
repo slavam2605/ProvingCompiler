@@ -7,6 +7,10 @@ class CompareEqualitySets {
     private val lessGraph = mutableMapOf<Int, MutableList<LessEdge>>()
 
     fun addTrueExpr(expr: LogicExpr) {
+        // Add the expression with `true` as a const value
+        val index = getOrCreateIndex(expr)
+        equalitySets[index].range = ValueRange.exact(true)
+
         if (expr !is LogicCompare)
             return
 
@@ -277,7 +281,9 @@ class CompareEqualitySets {
         }
         if (nonTrivialSets.isNotEmpty()) {
             println("\tEquality sets:")
-            println("\t\t${nonTrivialSets.joinToString()}")
+            for (set in nonTrivialSets) {
+                println("\t\t$set")
+            }
         }
         if (lessGraph.any { (_, list) -> list.isNotEmpty() }) {
             println("\tLess graph:")

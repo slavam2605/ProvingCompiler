@@ -1,6 +1,7 @@
 package org.example
 
 import org.example.AstNode.ContextKey
+import org.example.output.CompilerMessagePrinter
 import org.example.verification.*
 import java.lang.NumberFormatException
 
@@ -37,14 +38,14 @@ class LanguageResolver(private val input: String) {
     private fun resolveInvocation(node: InvocationNode): ResolvedType? {
         resolveExpr(node.expr)
         val symbol = node.expr[ResolvedSymbol.key] ?: return null
-        if (symbol !is ResolvedSymbol.Function) {
+        if (symbol !is ResolvedSymbol.Callable) {
             compilerMessagePrinter.printError(node.expr.offset, "Symbol '${symbol.name}' is not callable", "here")
             return null
         }
 
-        if (node.arguments.size != symbol.node.arguments.size) {
+        if (node.arguments.size != symbol.arguments.size) {
             compilerMessagePrinter.printError(node.offset, "Wrong number of arguments: expected " +
-                    "${symbol.node.arguments.size}, found ${node.arguments.size}", "here")
+                    "${symbol.arguments.size}, found ${node.arguments.size}", "here")
             return null
         }
 
@@ -57,7 +58,8 @@ class LanguageResolver(private val input: String) {
             }
         }
 
-        symbol.node.contract?.output?.let { outputContract ->
+        // TODO should verify that input contract is true; already done in LogicContainer, should be moved here for all types of invocations
+        symbol.contract?.output?.let { outputContract ->
             // TODO contract output should be resolved in resolveFunction, but I don't know how to deal with let-equals
             val argumentsMap = mutableMapOf<String, ExprNode>()
             for (i in node.arguments.indices) {
@@ -170,35 +172,44 @@ class LanguageResolver(private val input: String) {
         }
     }
 
-    private fun resolveIf(node: IfNode) {
-        resolveExpr(node.cond)
+    private fun resolveIf(node: IfNode): Boolean {
+        resolveExpr(node.cond) ?: return false
 
         var trueContainer = logicContainer.clone().apply { addTrue(node.cond) }
         var falseContainer = logicContainer.clone().apply { addFalse(node.cond) }
 
         trueContainer = withLogicContainer(trueContainer) {
-            resolveBlock(node.trueBlock)
+            if (!resolveBlock(node.trueBlock))
+                return false
         }
         falseContainer = withLogicContainer(falseContainer) {
-            node.falseBlock?.let { resolveBlock(it) }
+            node.falseBlock?.let {
+                if (!resolveBlock(it))
+                    return false
+            }
         }
         logicContainer = LogicContainer.merge(trueContainer, falseContainer)
+        return true
     }
 
-    private fun resolveLet(node: LetNode) {
+    private fun resolveLet(node: LetNode): Boolean {
         symbolMap[node.name]?.let { existingSymbol ->
             compilerMessagePrinter.printRedeclarationError(node.nameOffset, node.name, existingSymbol)
-            return // TODO: throw compilation exception, can be caught later
+            return false
         }
 
         if (node.type == null && node.initExpr == null) {
             compilerMessagePrinter.printError(node.nameOffset, "Uninitialized variable must have a declared type", "here")
+            return false
         }
 
         val type = node.type?.let { resolveType(it) }
-        val exprType = node.initExpr?.let { resolveExpr(it) }
+        val exprType = node.initExpr?.let {
+            resolveExpr(it) ?: return false
+        }
         if (type != null && exprType != null && type != exprType) {
             printErrorTypeMismatch(node.type.offset, type, exprType, "type is declared here")
+            return false
         }
 
         val symbolType = type ?: exprType ?: TypeErrorMarker
@@ -209,37 +220,40 @@ class LanguageResolver(private val input: String) {
             logicContainer.addTrue(
                 LogicCompare(
                 LogicVar(declaredSymbol),
-                LogicExpr.fromAst(node.initExpr) ?: return,
+                LogicExpr.fromAst(node.initExpr) ?: return false,
                 CompareNode.CompareOp.EQ)
             )
         }
+        return true
     }
 
-    private fun resolveAssign(node: AssignNode) {
+    private fun resolveAssign(node: AssignNode): Boolean {
         if (node.name !is NameNode) {
             compilerMessagePrinter.printError(node.offset, "Variable expected", "here")
-            return
+            return false
         }
 
-        resolveExpr(node.name)
-        resolveExpr(node.expr)
+        resolveExpr(node.name) ?: return false
+        resolveExpr(node.expr) ?: return false
 
-        val symbol = node.name[ResolvedSymbol.key] ?: return
+        val symbol = node.name[ResolvedSymbol.key] ?: return false
         logicContainer.variableChanged(symbol)
         logicContainer.addTrue(
             LogicCompare(
-            LogicExpr.fromAst(node.name) ?: return,
-            LogicExpr.fromAst(node.expr) ?: return,
+            LogicExpr.fromAst(node.name) ?: return false,
+            LogicExpr.fromAst(node.expr) ?: return false,
             CompareNode.CompareOp.EQ)
         )
+        return true
     }
 
-    private fun resolveReturn(node: ReturnNode) {
-        resolveExpr(node.expr)
+    private fun resolveReturn(node: ReturnNode): Boolean {
+        resolveExpr(node.expr) ?: return false
 
         node.proofBlock?.let { proofBlock ->
             val replacedList = replaceContractOutputPattern(proofBlock, node.expr)
-            resolveProofBlock(ProofBlockNode(replacedList, proofBlock.offset))
+            if (!resolveProofBlock(ProofBlockNode(replacedList, proofBlock.offset)))
+                return false
         }
 
         val function = currentFunction
@@ -247,48 +261,89 @@ class LanguageResolver(private val input: String) {
         function.node.contract?.output?.let { block ->
             val replacedList = replaceContractOutputPattern(block, node.expr)
             compilerMessagePrinter.withContext(ErrorContext(node.offset)) {
-                resolveProofBlock(ProofBlockNode(replacedList, block.offset))
+                if (!resolveProofBlock(ProofBlockNode(replacedList, block.offset)))
+                    return false
             }
         }
 
         logicContainer.addTrue(LogicBool(false))
+        return true
     }
 
-    private fun resolveLetEquals(node: LetEqualsNode) {
+    private fun resolveLetEquals(node: LetEqualsNode): Boolean {
         symbolMap[node.name]?.let { existingSymbol ->
             compilerMessagePrinter.printRedeclarationError(node.nameOffset, node.name, existingSymbol)
-            return
+            return false
         }
 
-        val type = resolveExpr(node.expr) ?: return
+        val type = resolveExpr(node.expr) ?: return false
 
         symbolMap[node.name] = ResolvedSymbol.LetAlias(node.name, node, type)
+        return true
     }
 
-    private fun resolveProofBlock(node: ProofBlockNode, skipVerification: Boolean = false) {
+    private fun resolveProofFunction(node: ProofFunctionNode): Boolean {
+        symbolMap[node.name]?.let { existingSymbol ->
+            compilerMessagePrinter.printRedeclarationError(node.nameOffset, node.name, existingSymbol)
+            return false
+        }
+
+        val arguments = node.arguments.map {
+            resolveArgument(it) ?: return false
+        }
+        symbolMap[node.name] = ResolvedSymbol.ProofFunction(node.name, node, arguments)
+        withLogicContainer(LogicContainer(compilerMessagePrinter)) {
+            symbolMap.withScope {
+                arguments.forEach {
+                    symbolMap[it.name] = it
+                }
+                node.contract?.let { contract ->
+                    resolveProofBlock(contract.input, skipVerification = true)
+                    contract.output?.let { resolveProofBlock(it, onlyResolve = true) }
+                }
+                if (!resolveProofBlock(node.body))
+                    // TODO print compiler error
+                    return false
+            }
+        }
+        return true
+    }
+
+    /**
+     * Resolves and verifies a proof block [node].
+     * @param skipVerification if `true`, assumes that all expressions are true and just adds them without verification
+     * @param onlyResolve if `true`, doesn't verify or add expressions, just resolves them
+     */
+    private fun resolveProofBlock(node: ProofBlockNode, skipVerification: Boolean = false, onlyResolve: Boolean = false): Boolean {
         symbolMap.withScope {
             node.exprList.forEach {
-                when (it) {
-                    is ExprNode -> resolveExpr(it)
+                val result = when (it) {
+                    is ExprNode -> resolveExpr(it) != null
                     is LetEqualsNode -> resolveLetEquals(it)
+                    is ProofFunctionNode -> resolveProofFunction(it)
                     else -> error("Unknown proof element: ${it.javaClass}")
                 }
+                if (!result) return false
             }
         }
 
-        logicContainer.verifyProofAndCollect(node.exprList, skipVerification = skipVerification)
+        if (onlyResolve) return true
+        return logicContainer.verifyProofAndCollect(node.exprList, skipVerification = skipVerification)
     }
 
-    private fun resolveCompilerCommand(node: CompilerCommandNode) {
-        if (node.name != "facts") {
-            compilerMessagePrinter.printError(node.offset, "Unknown compiler command: '${node.name}'", "here")
-            return
+    private fun resolveCompilerCommand(node: CompilerCommandNode): Boolean {
+        when (node.name) {
+            // TODO add "axioms" -- prints all axioms (patterns and some description for others)
+            "facts" -> logicContainer.printStatus(compilerMessagePrinter, node.offset)
+            else -> {
+                compilerMessagePrinter.printError(node.offset, "Unknown compiler command: '${node.name}'", "here")
+                return false
+            }
         }
-
-        logicContainer.printStatus(compilerMessagePrinter, node.offset)
+        return true
     }
 
-    private fun resolveBlock(node: BlockNode) {
+    private fun resolveBlock(node: BlockNode): Boolean {
         symbolMap.withScope {
             node.lines.forEach { statement ->
                 when (statement) {
@@ -299,45 +354,73 @@ class LanguageResolver(private val input: String) {
                     is ReturnNode -> resolveReturn(statement)
                     is ProofBlockNode -> resolveProofBlock(statement)
                     is CompilerCommandNode -> resolveCompilerCommand(statement)
-                }.let { /* Exhaustive check */ }
+                }.takeIf { it } ?: return false
             }
         }
+        return true
     }
 
-    private fun resolveFunction(node: FunctionNode) {
+    private fun resolveArgument(node: ArgumentNode): ResolvedSymbol? {
+        val type = resolveType(node.type) ?: return null
+        val symbol = ResolvedSymbol.FunctionArgument(node.name, node, type)
+        node[ResolvedSymbol.key] = symbol
+        return symbol
+    }
+
+    private fun resolveFunctionDeclaration(node: FunctionNode): Boolean {
+        val arguments = node.arguments.map {
+            resolveArgument(it) ?: return false
+        }
+        val returnType = resolveType(node.returnType) ?: return false
+
+        val symbol = ResolvedSymbol.Function(node.name, node, arguments, returnType)
+        node[ResolvedSymbol.key] = symbol
+        symbolMap[node.name] = symbol
+        return true
+    }
+
+    private fun resolveFunctionBody(node: FunctionNode): Boolean {
+        val symbol = node[ResolvedSymbol.key] as? ResolvedSymbol.Function
+            ?: error("Unresolved function symbol: ${node.name}")
+
         withLogicContainer(logicContainer.clone()) {
-            val arguments = node.arguments.map {
-                val type = resolveType(it.type) ?: return
-                val symbol = ResolvedSymbol.FunctionArgument(it.name, it, type)
-                symbolMap[it.name] = symbol
-                it[ResolvedSymbol.key] = symbol
-                symbol
+            node.arguments.forEach { arg ->
+                symbolMap[arg.name] = arg[ResolvedSymbol.key] ?: return false
             }
-            val returnType = resolveType(node.returnType) ?: return
 
             node.contract?.input?.let { inputContract ->
-                resolveProofBlock(inputContract, skipVerification = true)
+                if (!resolveProofBlock(inputContract, skipVerification = true))
+                    return false
             }
 
-            val symbol = ResolvedSymbol.Function(node.name, node, arguments, returnType)
-            symbolMap[node.name] = symbol
             try {
                 check(currentFunction == null)
                 currentFunction = symbol
-                resolveBlock(node.body)
+                if (!resolveBlock(node.body))
+                    return false
             } finally {
                 currentFunction = null
             }
         }
+        return true
     }
 
-    fun resolveFile(topLevel: List<FunctionNode>) {
+    fun resolveFile(topLevel: List<FunctionNode>): Boolean {
         // Create top-level file scope
         symbolMap.pushScope()
 
         topLevel.forEach {
-            resolveFunction(it)
+            if (!resolveFunctionDeclaration(it))
+                return false
         }
+
+        // TODO exit if error occurred
+
+        topLevel.forEach {
+            if (!resolveFunctionBody(it))
+                return false
+        }
+        return true
     }
 
     private fun assertType(found: ResolvedType?, expected: ResolvedType, offset: Int, hint: String = "here"): ResolvedType? {
@@ -351,11 +434,11 @@ class LanguageResolver(private val input: String) {
         compilerMessagePrinter.printError(offset, "Type mismatch: expected '$expected', found '$found'", hint)
     }
 
-    private fun replaceContractOutputPattern(block: ProofBlockNode, targetExpr: ExprNode,
+    private fun replaceContractOutputPattern(block: ProofBlockNode, dollarExpr: ExprNode?,
                                              additionalMap: Map<String, ExprNode> = emptyMap()): List<ProofElement> {
         val replaceBlock = block@ { expr: ExprNode ->
             if (expr is NameNode) {
-                if (expr.name == "$") return@block targetExpr
+                if (expr.name == "$") return@block dollarExpr
                 additionalMap[expr.name]?.let { return@block it }
             }
             null
@@ -404,17 +487,43 @@ class LanguageResolver(private val input: String) {
     }
 
     sealed class ResolvedSymbol(val name: String, val type: ResolvedType) {
-        class Function(name: String, val node: FunctionNode, val arguments: List<ResolvedSymbol>,
-                       val returnType: ResolvedType) : ResolvedSymbol(name, FunctionType(arguments, returnType)) {
+        sealed class Callable(name: String, type: ResolvedType) : ResolvedSymbol(name, type) {
+            abstract val arguments: List<ResolvedSymbol>
+            abstract val contract: FunctionContract?
+            abstract val returnType: ResolvedType
+        }
+
+        class Function(
+            name: String,
+            val node: FunctionNode,
+            override val arguments: List<ResolvedSymbol>,
+            override val returnType: ResolvedType
+        ) : Callable(name, FunctionType(arguments, returnType)) {
+            override val contract: FunctionContract?
+                get() = node.contract
+
             override fun toString() = "function($name)"
         }
 
+        class ProofFunction(
+            name: String,
+            val node: ProofFunctionNode,
+            override val arguments: List<ResolvedSymbol>
+        ) : Callable(name, TypeErrorMarker) {
+            override val contract: FunctionContract?
+                get() = node.contract
+
+            override val returnType: ResolvedType
+                get() = TypeErrorMarker
+        }
+
         class FunctionArgument(name: String, val node: ArgumentNode, type: ResolvedType) : ResolvedSymbol(name, type) {
-            override fun toString() = "argument($name)"
+            // TODO return argument() later or in case of colliding names
+            override fun toString() = "$name"
         }
 
         class LocalVariable(name: String, val node: LetNode, val isMut: Boolean, type: ResolvedType) : ResolvedSymbol(name, type) {
-//            override fun toString() = "local($name)"
+            //            override fun toString() = "local($name)"
             // TODO return local() later
             override fun toString() = "$name"
         }

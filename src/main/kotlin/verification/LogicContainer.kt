@@ -1,6 +1,7 @@
 package org.example.verification
 
 import org.example.*
+import org.example.output.CompilerMessagePrinter
 import java.util.*
 
 class LogicContainer(private val compilerMessagePrinter: CompilerMessagePrinter) {
@@ -34,13 +35,52 @@ class LogicContainer(private val compilerMessagePrinter: CompilerMessagePrinter)
     }
 
     /**
-     * If [skipVerification] is true, then assume that all elements are true and just add them
+     * Given [invocationExpr] `foo(expr1, expr2, ...)` where `foo` is `fun(a, b, ...)`
+     * replaces `a` with `expr1`, `b` with `expr2` etc. in [expr]
      */
-    fun verifyProofAndCollect(list: List<ProofElement>, skipVerification: Boolean) {
+    private fun replaceWithInvocationArguments(expr: LogicExpr, invocationExpr: LogicInvocation) =
+        expr.replaceTree { innerExpr ->
+            val symbol = (innerExpr as? LogicVar)?.symbol ?: return@replaceTree null
+            val index = invocationExpr.symbol.arguments.indexOfFirst { it === symbol }.takeIf { it >= 0 }
+                ?: return@replaceTree null
+            invocationExpr.arguments[index]
+        }
+
+    private fun applyOutputContract(invocationExpr: LogicInvocation) {
+        val output = invocationExpr.symbol.contract?.output ?: return
+        val exprList = output.exprList
+            .map { LogicExpr.fromAstNotNull(it as ExprNode) { return } }
+            .map { replaceWithInvocationArguments(it, invocationExpr) }
+        exprList.forEach {
+            addTrue(it, noSplit = true)
+        }
+    }
+
+    private fun checkInputContract(verifier: ProofVerifier, invocationExpr: LogicInvocation): Boolean {
+        val input = invocationExpr.symbol.contract?.input ?: return true
+        // TODO print compiler error if exprList contains something other than ExprNode
+        val exprList = input.exprList
+            .map { LogicExpr.fromAstNotNull(it as ExprNode) { return false } }
+            .map { replaceWithInvocationArguments(it, invocationExpr) }
+        exprList.forEachIndexed { index, inputExpr ->
+            if (!verifier.verifyExpr(inputExpr)) {
+                val node = (invocationExpr.symbol as LanguageResolver.ResolvedSymbol.ProofFunction).node
+                compilerMessagePrinter.printError((input.exprList[index] as ExprNode).offset, "Failed to prove input contract", "for proof '${node.name}'")
+                return false
+            }
+        }
+        return true
+    }
+
+    /**
+     * If [skipVerification] is true, then assume that all elements are true and just add them.
+     * @return `true` if verification was successful. Always `true` if [skipVerification] is `true`.
+     */
+    fun verifyProofAndCollect(list: List<ProofElement>, skipVerification: Boolean): Boolean {
         val verifier = ProofVerifier(this)
         val letAliases = mutableMapOf<String, LogicExpr>()
-        fun replaceAliases(expr: LogicExpr) = expr.replaceTree {
-            ((expr as? LogicVar)?.symbol as? LanguageResolver.ResolvedSymbol.LetAlias)?.let { letAliases[it.name] }
+        fun replaceAliases(expr: LogicExpr) = expr.replaceTree { innerExpr ->
+            ((innerExpr as? LogicVar)?.symbol as? LanguageResolver.ResolvedSymbol.LetAlias)?.let { letAliases[it.name] }
         }
 
         val logicList = list.map { (it as? ExprNode)?.let { e -> LogicExpr.fromAst(e) } }
@@ -48,20 +88,36 @@ class LogicContainer(private val compilerMessagePrinter: CompilerMessagePrinter)
             when {
                 proofElement != null -> {
                     val expr = replaceAliases(proofElement)
+                    if (expr is LogicInvocation && expr.symbol is LanguageResolver.ResolvedSymbol.ProofFunction)  {
+                        if (skipVerification) {
+                            error("Can't skip verification for proof invocation")
+                        }
+                        compilerMessagePrinter.withContext(LanguageResolver.ErrorContext((list[index] as ExprNode).offset)) {
+                            if (!checkInputContract(verifier, expr))
+                                return false
+                        }
+                        applyOutputContract(expr)
+                        return@forEachIndexed
+                    }
+
                     if (!skipVerification && !verifier.verifyExpr(expr)) {
+                        // TODO add expansion of let-elements
                         compilerMessagePrinter.printError((list[index] as AstNode).offset, "Failed to prove the proof element", "here")
-                        return
+                        return false
                     }
 
                     // Don't split provided expressions, they may be needed later
                     addTrue(expr, noSplit = true)
                 }
-                else -> {
+                list[index] is LetEqualsNode -> {
                     val letEqualsNode = list[index] as LetEqualsNode
-                    letAliases[letEqualsNode.name] = LogicExpr.fromAstNotNull(letEqualsNode.expr) { return }
+                    letAliases[letEqualsNode.name] = LogicExpr.fromAstNotNull(letEqualsNode.expr) { return false }
                 }
+                list[index] is ProofFunctionNode -> { /* Skip proof declaration */ }
+                else -> error("Unknown proof element: ${list[index].javaClass}")
             }
         }
+        return true
     }
 
     /**
@@ -71,6 +127,10 @@ class LogicContainer(private val compilerMessagePrinter: CompilerMessagePrinter)
     internal fun simplifyExpr(originalExpr: LogicExpr) = originalExpr.recursiveTransform block@ { expr ->
         compareEqualitySets.getExprRange(expr).boolValue?.let {
             return@block LogicBool(it)
+        }
+
+        if (compareEqualitySets.isTrue(expr)) {
+            return@block LogicBool(true)
         }
 
         val leftBool = (expr.children.getOrNull(0) as? LogicBool)?.value
@@ -124,7 +184,7 @@ class LogicContainer(private val compilerMessagePrinter: CompilerMessagePrinter)
     }
 
     fun printStatus(printer: CompilerMessagePrinter, offset: Int) {
-        printer.printInformation(offset, "Logic container dump")
+        printer.printInformation(offset, "Proof information status")
         println("\tTrue facts:")
         trueList.forEach { println("\t\t$it") }
         compareEqualitySets.printStatus()
@@ -241,7 +301,7 @@ sealed class LogicExpr(private val precedence: Int, vararg val children: LogicEx
             return when (node) {
                 is InvocationNode -> {
                     val symbol = node.expr[LanguageResolver.ResolvedSymbol.key]
-                            as? LanguageResolver.ResolvedSymbol.Function ?: return null
+                            as? LanguageResolver.ResolvedSymbol.Callable ?: return null
                     val arguments = node.arguments.map {
                         fromAst(it) ?: return null
                     }
@@ -301,7 +361,7 @@ sealed class LogicExpr(private val precedence: Int, vararg val children: LogicEx
 }
 
 class LogicInvocation(
-    val symbol: LanguageResolver.ResolvedSymbol.Function,
+    val symbol: LanguageResolver.ResolvedSymbol.Callable,
     val arguments: List<LogicExpr>
 ) : LogicExpr(1000, *arguments.toTypedArray()) {
     override fun shallowEquals(other: LogicExpr): Boolean {
