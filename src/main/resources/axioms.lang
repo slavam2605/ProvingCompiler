@@ -1,0 +1,183 @@
+axiom(a: bool, b: bool, c: bool) {
+    #[a -> b, a -> c, a] {
+        b;
+        c;
+        b -> c -> b && c;
+        c -> b && c;
+        b && c;
+    }
+    (a -> b) -> (a -> c) -> a -> b && c;
+}
+
+axiom(a: bool, b: bool) {
+    #[a -> b, a] {
+        b;
+        a -> b -> a && b;
+        b -> a && b;
+        a && b;
+    }
+    (a -> b) -> a -> a && b;
+}
+
+axiom(a: bool, b: bool) {
+    #[a, !a] {
+        a -> !b -> a;
+        !b -> a;
+        !a -> !b -> !a;
+        !b -> !a;
+        (!b -> a) -> (!b -> !a) -> !!b;
+        (!b -> !a) -> !!b;
+        !!b;
+        !!b -> b;
+        b;
+    }
+    a -> !a -> b;
+}
+
+axiom(a: bool, b: bool) {
+    b -> !a -> b;
+    a -> !a -> b;
+    (a -> !a -> b) -> (b -> !a -> b) -> a || b -> !a -> b;
+    (b -> !a -> b) -> a || b -> !a -> b;
+    a || b -> !a -> b;
+}
+
+axiom(a: bool, b: bool) {
+    #[!a] {
+        b -> a || b;
+    }
+    !a -> b -> a || b;
+}
+
+axiom(a: bool, b: bool) {
+    a && b -> a;
+    a && b -> b;
+    #[a && b] {
+        a;
+        b;
+        b -> a -> b && a;
+        a -> b && a;
+        b && a;
+    }
+    a && b -> b && a;
+}
+
+axiom(a: bool, b: bool) {
+    a -> b || a;
+    b -> b || a;
+    (a -> b || a) -> (b -> b || a) -> (a || b -> b || a);
+    (b -> b || a) -> (a || b -> b || a);
+    a || b -> b || a;
+}
+
+axiom(a: bool, b: bool, c: bool) {
+    (a -> b) -> (a -> b -> c) -> a -> c;
+    #[a -> b] {
+        (a -> b -> c) -> a -> c;
+        #[b -> c] {
+            (b -> c) -> a -> b -> c;
+            a -> b -> c;
+            a -> c;
+        }
+    }
+    (a -> b) -> (b -> c) -> a -> c;
+}
+
+axiom(a: bool, b: bool) {
+    #[!(a || b)] {
+        !(a || b);
+        !(a || b) -> a -> !(a || b);
+        a -> !(a || b);
+        a -> a || b;
+        (a -> a || b) -> (a -> !(a || b)) -> !a;
+        (a -> !(a || b)) -> !a;
+        !a;
+
+        !(a || b) -> b -> !(a || b);
+        b -> !(a || b);
+        b -> a || b;
+        (b -> a || b) -> (b -> !(a || b)) -> !b;
+        (b -> !(a || b)) -> !b;
+        !b;
+
+        !a -> !b -> !a && !b;
+        !b -> !a && !b;
+        !a && !b;
+    }
+    !(a || b) -> !a && !b;
+}
+
+axiom(a: bool, b: bool) {
+    #[!(a && b)] {
+        #[!(!a || !b)] {
+            !(!a || !b) -> !!a && !!b;
+            !!a && !!b;
+            !!a && !!b -> !!a;
+            !!a && !!b -> !!b;
+            !!a;
+            !!b;
+            !!a -> a;
+            a;
+            !!b -> b;
+            b;
+            a -> b -> a && b;
+            b -> a && b;
+            a && b;
+        } // !(!a || !b) -> a && b;
+
+        !(a && b) -> !(!a || !b) -> !(a && b);
+        !(!a || !b) -> !(a && b);
+        (!(!a || !b) -> a && b) -> (!(!a || !b) -> !(a && b)) -> !!(!a || !b);
+        (!(!a || !b) -> !(a && b)) -> !!(!a || !b);
+        !!(!a || !b);
+        !!(!a || !b) -> !a || !b;
+        !a || !b;
+    }
+    !(a && b) -> !a || !b;
+}
+
+axiom(a: bool, b: bool) {
+    #[!a] {
+        !a;
+        !a -> a && b -> !a;
+        a && b -> !a;
+        a && b -> a;
+        (a && b -> a) -> (a && b -> !a) -> !(a && b);
+        (a && b -> !a) -> !(a && b);
+        !(a && b);
+    } // !a -> !(a && b)
+
+    #[!b] {
+        !b;
+        !b -> a && b -> !b;
+        a && b -> !b;
+        a && b -> b;
+        (a && b -> b) -> (a && b -> !b) -> !(a && b);
+        (a && b -> !b) -> !(a && b);
+        !(a && b);
+    } // !b -> !(a && b);
+
+    (!a -> !(a && b)) -> (!b -> !(a && b)) -> !a || !b -> !(a && b);
+    (!b -> !(a && b)) -> !a || !b -> !(a && b);
+    !a || !b -> !(a && b);
+}
+
+axiom(a: bool) {
+    a -> a -> a;
+    a -> (a -> a) -> a;
+    (a -> a -> a) -> (a -> (a -> a) -> a) -> a -> a;
+    (a -> (a -> a) -> a) -> a -> a;
+    a -> a;
+}
+
+axiom(a: bool) {
+    #[a] {
+        !a -> !a;
+        a -> !a -> a;
+        !a -> a;
+        (!a -> a) -> (!a -> !a) -> !!a;
+        (!a -> !a) -> !!a;
+        !!a;
+    }
+    a -> !!a;
+}

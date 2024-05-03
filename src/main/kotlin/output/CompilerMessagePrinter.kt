@@ -3,11 +3,21 @@ package org.example.output
 import org.example.LanguageResolver
 import java.io.PrintStream
 
-class CompilerMessagePrinter(private val input: String) {
+class CompilerMessagePrinter {
+    internal var input: String = ""
     internal val contextStack = mutableListOf<LanguageResolver.ErrorContext>()
     
     private val stream: PrintStream
-        get() = System.err
+        get() = System.out
+
+    internal inline fun <T> withInput(value: String, block: () -> T): T {
+        input = value
+        try {
+            return block()
+        } finally {
+            input = ""
+        }
+    }
 
     internal inline fun <T> withContext(context: LanguageResolver.ErrorContext, block: () -> T): T {
         contextStack.add(context)

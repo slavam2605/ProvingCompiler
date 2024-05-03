@@ -1,9 +1,127 @@
 package org.example.verification
 
+import org.example.*
 import org.example.CompareNode.CompareOp
 import org.example.LanguageResolver.ResolvedSymbol
 
-class ProofVerifier(private val logicContainer: LogicContainer) {
+class ProofVerifier(
+    private val parent: ProofVerifier?,
+    private val context: List<LogicExpr>,
+    private val logicContainer: LogicContainer
+) {
+    private val localTrueList = mutableListOf<LogicExpr>()
+    private val letAliases = mutableMapOf<String, LogicExpr>()
+
+    private val trueSequence: Sequence<LogicExpr>
+        get() = (parent?.trueSequence ?: logicContainer.trueList.asSequence()) + localTrueList.asSequence()
+
+    init {
+        localTrueList.addAll(context)
+    }
+
+    private fun tryGetAlias(expr: LogicExpr): LogicExpr? {
+        val letAlias = (expr as? LogicVar)?.symbol as? ResolvedSymbol.LetAlias ?: return null
+        return letAliases[letAlias.name] ?: parent?.tryGetAlias(expr)
+    }
+
+    private fun addTrueExpr(expr: LogicExpr) {
+        localTrueList.add(expr)
+        val exprWithContext = context.foldRight(expr) { contextExpr, acc -> LogicArrow(contextExpr, acc) }
+        if (parent != null) {
+            parent.addTrueExpr(exprWithContext)
+        } else {
+            logicContainer.addTrue(expr, noSplit = true)
+        }
+    }
+
+    /**
+     * Given [invocationExpr] `foo(expr1, expr2, ...)` where `foo` is `fun(a, b, ...)`
+     * replaces `a` with `expr1`, `b` with `expr2` etc. in [expr]
+     */
+    private fun replaceWithInvocationArguments(expr: LogicExpr, invocationExpr: LogicInvocation) =
+        expr.replaceTree { innerExpr ->
+            val symbol = (innerExpr as? LogicVar)?.symbol ?: return@replaceTree null
+            val index = invocationExpr.symbol.arguments.indexOfFirst { it === symbol }.takeIf { it >= 0 }
+                ?: return@replaceTree null
+            invocationExpr.arguments[index]
+        }
+
+    private fun applyOutputContract(invocationExpr: LogicInvocation) {
+        val output = invocationExpr.symbol.contract?.output ?: return
+        val exprList = output.exprList
+            .map { LogicExpr.fromAstNotNull(it as ExprNode) { return } }
+            .map { replaceWithInvocationArguments(it, invocationExpr) }
+        exprList.forEach {
+            addTrueExpr(it)
+        }
+    }
+
+    private fun checkInputContract(invocationExpr: LogicInvocation): Boolean {
+        val input = invocationExpr.symbol.contract?.input ?: return true
+        // TODO print compiler error if exprList contains something other than ExprNode
+        val exprList = input.exprList
+            .map { LogicExpr.fromAstNotNull(it as ExprNode) { return false } }
+            .map { replaceWithInvocationArguments(it, invocationExpr) }
+        exprList.forEachIndexed { index, inputExpr ->
+            if (!verifyExpr(inputExpr)) {
+                val node = (invocationExpr.symbol as ResolvedSymbol.ProofFunction).node
+                val exprNode = input.exprList[index] as ExprNode
+                logicContainer.compilerMessagePrinter.printError(exprNode.offset, "Failed to prove input contract", "for proof '${node.name}'")
+                return false
+            }
+        }
+        return true
+    }
+
+    /**
+     * If [skipVerification] is true, then assume that all elements are true and just add them.
+     * @return `true` if verification was successful. Always `true` if [skipVerification] is `true`.
+     */
+    fun verifyProofAndCollect(list: List<ProofElement>, skipVerification: Boolean): Boolean {
+        list.forEach { node ->
+            when (node) {
+                is ExprNode -> {
+                    val expr = LogicExpr.fromAstNotNull(node) { return false }
+                        .replaceTree { tryGetAlias(it) }
+
+                    if (expr is LogicInvocation && expr.symbol is ResolvedSymbol.ProofFunction)  {
+                        if (skipVerification) {
+                            error("Can't skip verification for proof invocation")
+                        }
+                        logicContainer.compilerMessagePrinter.withContext(LanguageResolver.ErrorContext(node.offset)) {
+                            if (!checkInputContract(expr))
+                                return false
+                        }
+                        applyOutputContract(expr)
+                        return@forEach
+                    }
+
+                    if (!skipVerification && !verifyExpr(expr)) {
+                        // TODO add expansion of let-elements
+                        logicContainer.compilerMessagePrinter.printError(node.offset, "Failed to prove the proof element", "here")
+                        return false
+                    }
+
+                    addTrueExpr(expr)
+                }
+                is LetEqualsNode -> {
+                    letAliases[node.name] = LogicExpr.fromAstNotNull(node.expr) { return false }
+                }
+                is ProofFunctionNode -> { /* Skip proof declaration */ }
+                is DeductionBlockNode -> {
+                    check(!skipVerification) { "`skipVerification == false` is not allowed for deduction blocks" }
+                    val context = node.inputs.map {
+                        LogicExpr.fromAstNotNull(it) { return false }
+                    }
+                    ProofVerifier(this, context, logicContainer)
+                        .verifyProofAndCollect(node.body.exprList, false)
+                }
+                else -> error("Unknown proof element: ${node.javaClass}")
+            }
+        }
+        return true
+    }
+
     private fun areEqualWithEqualitySet(left: LogicExpr, right: LogicExpr): Boolean {
         if (logicContainer.compareEqualitySets.areEqual(left, right))
             return true
@@ -28,7 +146,7 @@ class ProofVerifier(private val logicContainer: LogicContainer) {
     }
 
     private fun containsEqual(expr: LogicExpr): Boolean {
-        return logicContainer.trueList.any { areEqualWithEqualitySet(it, expr) }
+        return trueSequence.any { areEqualWithEqualitySet(it, expr) }
     }
 
     /**
@@ -48,7 +166,7 @@ class ProofVerifier(private val logicContainer: LogicContainer) {
     }
 
     private fun matchesAxiom(expr: LogicExpr): Boolean {
-        for (axiom in axiomList) {
+        for (axiom in axiomList + logicContainer.axiomList) {
             if (matchesAxiom(expr, axiom, mutableMapOf()))
                 return true
         }
@@ -99,7 +217,7 @@ class ProofVerifier(private val logicContainer: LogicContainer) {
             }
         }
 
-        return logicContainer.trueList.any { trueExpr ->
+        return trueSequence.any { trueExpr ->
             if (trueExpr !is LogicArrow)
                 return@any false
 
@@ -120,113 +238,92 @@ class ProofVerifier(private val logicContainer: LogicContainer) {
     }
 
     companion object {
-        private val a = LogicVar(ResolvedSymbol.PatternName("a"))
-        private val b = LogicVar(ResolvedSymbol.PatternName("b"))
-        private val c = LogicVar(ResolvedSymbol.PatternName("c"))
+        private val a = LogicVar(ResolvedSymbol.PatternName("a", LanguageResolver.BoolType))
+        private val b = LogicVar(ResolvedSymbol.PatternName("b", LanguageResolver.BoolType))
+        private val c = LogicVar(ResolvedSymbol.PatternName("c", LanguageResolver.BoolType))
+        private val x = LogicVar(ResolvedSymbol.PatternName("x", LanguageResolver.IntType))
+        private val y = LogicVar(ResolvedSymbol.PatternName("y", LanguageResolver.IntType))
 
         private val axiomList: List<LogicExpr> = listOf(
-            // a -> a
-            LogicArrow(a, a),
-
             // a -> b -> a
             LogicArrow(a, LogicArrow(b, a)),
+
+            // (a -> b) -> (a -> b -> c) -> a -> c
+            LogicArrow(LogicArrow(a, b), LogicArrow(LogicArrow(a, LogicArrow(b, c)), LogicArrow(a, c))),
 
             // a -> b -> a && b
             LogicArrow(a, LogicArrow(b, LogicAnd(a, b))),
 
-            // !(a && b) -> !a || !b
-            LogicArrow(LogicNot(LogicAnd(a, b)), LogicOr(LogicNot(a), LogicNot(b))),
+            // a && b -> a
+            LogicArrow(LogicAnd(a, b), a),
 
-            // !a && !b -> !(a || b)
-            LogicArrow(LogicAnd(LogicNot(a), LogicNot(b)), LogicNot(LogicOr(a, b))),
+            // a && b -> b
+            LogicArrow(LogicAnd(a, b), b),
 
-            // a || b -> b || a
-            LogicArrow(LogicOr(a, b), LogicOr(b, a)),
+            // a -> a || b
+            LogicArrow(a, LogicOr(a, b)),
 
-            // a || b -> !a -> b
-            LogicArrow(LogicOr(a, b), LogicArrow(LogicNot(a), b)),
+            // b -> a || b
+            LogicArrow(b, LogicOr(a, b)),
 
-            // !a -> b -> a || b;
-            LogicArrow(LogicNot(a), LogicArrow(b, LogicOr(a, b))),
+            // (a -> c) -> (b -> c) -> a || b -> c
+            LogicArrow(LogicArrow(a, c), LogicArrow(LogicArrow(b, c), LogicArrow(LogicOr(a, b), c))),
 
-            // a -> !!a
-            LogicArrow(a, LogicNot(LogicNot(a))),
+            // (a -> b) -> (a -> !b) -> !a
+            LogicArrow(LogicArrow(a, b), LogicArrow(LogicArrow(a, LogicNot(b)), LogicNot(a))),
 
-            // (a -> b) -> (b -> c) -> a -> c
-            LogicArrow(LogicArrow(a, b), LogicArrow(LogicArrow(b, c), LogicArrow(a, c))),
-
-            // (a -> b) -> a -> a && b
-            LogicArrow(LogicArrow(a, b), LogicArrow(a, LogicAnd(a, b))),
-
-            // (a -> b) -> (a -> c) -> a -> b && c
-            LogicArrow(LogicArrow(a, b), LogicArrow(LogicArrow(a, c), LogicArrow(a, LogicAnd(b, c)))),
-
-            // (a -> false) -> !a
-            LogicArrow(LogicArrow(a, LogicBool(false)), LogicNot(a)),
-
-            // a -> !a -> b
-            LogicArrow(a, LogicArrow(LogicNot(a), b))
+            // !!a -> a
+            LogicArrow(LogicNot(LogicNot(a)), a)
         ) + createCompareAxioms()
 
         private fun createCompareAxioms(): List<LogicExpr> {
             val allCompareOps = CompareOp.entries
             val result = mutableListOf<LogicExpr>()
 
-            // Negate: !(a <= b) -> a > b
+            // Negate: !(x <= y) -> x > y
             for (op in allCompareOps) {
-                result.add(LogicArrow(LogicNot(LogicCompare(a, b, op)), LogicCompare(a, b, op.negate())))
+                result.add(LogicArrow(LogicNot(LogicCompare(x, y, op)), LogicCompare(x, y, op.negate())))
             }
 
-            // Weaken: a < b -> a <= b
+            // Weaken: x < y -> x <= y
             for (op in allCompareOps) {
                 val weakOp = op.weaken() ?: continue
-                result.add(LogicArrow(LogicCompare(a, b, op), LogicCompare(a, b, weakOp)))
+                result.add(LogicArrow(LogicCompare(x, y, op), LogicCompare(x, y, weakOp)))
             }
 
-            // Flip: a > b -> b < a
+            // Flip: x > y -> y < x
             for (op in allCompareOps) {
                 val flipOp = op.flip().takeIf { it != op } ?: continue
-                result.add(LogicArrow(LogicCompare(a, b, op), LogicCompare(b, a, flipOp)))
+                result.add(LogicArrow(LogicCompare(x, y, op), LogicCompare(y, x, flipOp)))
             }
 
-            // Enforce: !(a == b) -> a <= b -> a < b
+            // Enforce: !(x == y) -> x <= y -> x < y
             for (op in allCompareOps) {
                 val weakOp = op.weaken() ?: continue
-                result.add(LogicArrow(LogicNot(LogicCompare(a, b, CompareOp.EQ)), LogicArrow(
-                    LogicCompare(a, b, weakOp), LogicCompare(a, b, op)
+                result.add(LogicArrow(LogicNot(LogicCompare(x, y, CompareOp.EQ)), LogicArrow(
+                    LogicCompare(x, y, weakOp), LogicCompare(x, y, op)
                 )))
             }
 
-            // a < b && a > b -> false
-            result.add(LogicArrow(LogicAnd(LogicCompare(a, b, CompareOp.LT), LogicCompare(a, b, CompareOp.GT)), LogicBool(false)))
+            // x < y && x > y -> false
+            result.add(LogicArrow(LogicAnd(LogicCompare(x, y, CompareOp.LT), LogicCompare(x, y, CompareOp.GT)), LogicBool(false)))
 
-            // a > b && a < b -> false
-            result.add(LogicArrow(LogicAnd(LogicCompare(a, b, CompareOp.GT), LogicCompare(a, b, CompareOp.LT)), LogicBool(false)))
+            // x > y && x < y -> false
+            result.add(LogicArrow(LogicAnd(LogicCompare(x, y, CompareOp.GT), LogicCompare(x, y, CompareOp.LT)), LogicBool(false)))
 
-            // a < b && b < a -> false
-            result.add(LogicArrow(LogicAnd(LogicCompare(a, b, CompareOp.LT), LogicCompare(b, a, CompareOp.LT)), LogicBool(false)))
+            // x < y && y < x -> false
+            result.add(LogicArrow(LogicAnd(LogicCompare(x, y, CompareOp.LT), LogicCompare(y, x, CompareOp.LT)), LogicBool(false)))
 
-            // a > b && b > a -> false
-            result.add(LogicArrow(LogicAnd(LogicCompare(a, b, CompareOp.GT), LogicCompare(b, a, CompareOp.GT)), LogicBool(false)))
+            // x > y && y > x -> false
+            result.add(LogicArrow(LogicAnd(LogicCompare(x, y, CompareOp.GT), LogicCompare(y, x, CompareOp.GT)), LogicBool(false)))
 
-            // a <= b && a >= b -> a == b
-            result.add(LogicArrow(LogicAnd(LogicCompare(a, b, CompareOp.LE), LogicCompare(a, b, CompareOp.GE)), LogicCompare(a, b, CompareOp.EQ)))
+            // x <= y && x >= y -> x == y
+            result.add(LogicArrow(LogicAnd(LogicCompare(x, y, CompareOp.LE), LogicCompare(x, y, CompareOp.GE)), LogicCompare(x, y, CompareOp.EQ)))
 
-            // a >= b && a <= b -> a == b
-            result.add(LogicArrow(LogicAnd(LogicCompare(a, b, CompareOp.GE), LogicCompare(a, b, CompareOp.LE)), LogicCompare(a, b, CompareOp.EQ)))
+            // x >= y && x <= y -> x == y
+            result.add(LogicArrow(LogicAnd(LogicCompare(x, y, CompareOp.GE), LogicCompare(x, y, CompareOp.LE)), LogicCompare(x, y, CompareOp.EQ)))
 
             return result
         }
     }
-    /**
-     *  (a -> (b -> c)) -> ((a -> b) -> (a -> c))
-     *  (!a -> !b) -> (b -> a)
-     *  a; b -> a & b
-     *  a & b -> a
-     *  a & b -> b
-     *  a -> a | b
-     *  b -> a | b
-     *  !!a -> a
-     *  a | !a
-     */
 }

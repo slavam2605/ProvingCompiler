@@ -7,16 +7,16 @@ import me.alllex.parsus.token.regexToken
 object LanguageParser {
     private fun Grammar<*>.keyword(name: String) = regexToken("$name\\b")
 
-    private suspend fun <R> ParsingScope.parseRequired(p: Parser<R>): R {
+    private suspend fun <R> ParsingScope.required(p: Parser<R>): R {
         return tryParse(p).getOrThrow()
     }
 
     private fun <R> Parser<R>.required(): Parser<R> {
         val p = this
-        return parser { parseRequired(p) }
+        return parser { required(p) }
     }
 
-    private val grammar = object : Grammar<List<FunctionNode>>() {
+    private val grammar = object : Grammar<List<TopLevel>>() {
         init {
             regexToken("\\s+", ignored = true)
             regexToken("//[^\n\r]*", ignored = true)
@@ -32,6 +32,7 @@ object LanguageParser {
         val falseKeyword by keyword("false")
         val funKeyword by keyword("fun")
         val proofKeyword by keyword("proof")
+        val axiomKeyword by keyword("axiom")
         val id by regexToken("[a-zA-Z_][a-zA-Z0-9_]*")
         val int by regexToken("[0-9]+")
         val semicolon by literalToken(";").required()
@@ -58,8 +59,8 @@ object LanguageParser {
         val arrow by literalToken("->")
         val letEquals by literalToken(":=")
         val comma by literalToken(",")
-        val lsquare by literalToken("[")
-        val rsquare by literalToken("]")
+        val leftSquare by literalToken("[")
+        val rightSquare by literalToken("]")
         val dollar by literalToken("$")
 
         // Tries to parse "-", but fails if it is "->"
@@ -116,9 +117,9 @@ object LanguageParser {
         val ifStatement by parser {
             val offset = ifKeyword().offset
             val cond = expr()
-            val trueOffset = (parseRequired(leftBrace)).offset
+            val trueOffset = (required(leftBrace)).offset
             val trueBlock = zeroOrMore(statement)()
-            parseRequired(rightBrace)
+            required(rightBrace)
             val falseBlock = poll(elseKeyword)?.let {
                 val falseOffset = leftBrace().offset
                 val lines = zeroOrMore(statement)()
@@ -160,9 +161,21 @@ object LanguageParser {
             LetEqualsNode(it.t2.text, it.t4, it.t2.offset, it.t1.offset)
         }
 
+        val deductionBlock: Parser<ProofElement> by parser {
+            val offset = hash().offset
+            leftSquare()
+            val inputs = separated(expr, comma)()
+            rightSquare()
+            val blockOffset = leftBrace().offset
+            val body = zeroOrMore(ref(::proofElement))()
+            required(rightBrace)
+            DeductionBlockNode(inputs, ProofBlockNode(body, blockOffset), offset)
+        }
+
         val proofElement: Parser<ProofElement> by letProofStatement or
                 (expr * semicolon map { it.first }) or
-                ref(::proofFunction)
+                ref(::proofFunction) or
+                deductionBlock
 
         val proofBlock by hash * leftBrace * zeroOrMore(proofElement) * rightBrace map {
             ProofBlockNode(it.t3, it.t1.offset)
@@ -185,14 +198,14 @@ object LanguageParser {
 
         val functionContract by parser(setOf(hash)) {
             val offset = hash().offset
-            val inputOffset = lsquare().offset
+            val inputOffset = leftSquare().offset
             val input = ProofBlockNode(separated(expr, comma)(), inputOffset)
-            rsquare()
+            rightSquare()
             val arrow = poll(arrow)
             val output = arrow?.let {
-                val off = lsquare().offset
+                val off = leftSquare().offset
                 val o = separated(expr, comma)()
-                parseRequired(rsquare)
+                required(rightSquare)
                 o to off
             }?.let { ProofBlockNode(it.first, it.second) }
             FunctionContract(input, output, offset)
@@ -224,10 +237,24 @@ object LanguageParser {
             ProofFunctionNode(name.text, contract, arguments, ProofBlockNode(elements, blockOffset), name.offset, offset)
         }
 
-        override val root by zeroOrMore(functionDeclaration)
+        val axiomDeclaration by parser {
+            val offset = axiomKeyword().offset
+            val name = poll(id)?.text
+            required(leftPar)
+            val arguments = required(separated(functionArgument, comma))
+            required(rightPar)
+            val blockOffset = required(leftBrace).offset
+            val body = required(zeroOrMore(proofElement))
+            required(rightBrace)
+            AxiomNode(name, arguments, ProofBlockNode(body, blockOffset), offset)
+        }
+
+        val topLevel: Parser<TopLevel> by functionDeclaration or axiomDeclaration
+
+        override val root by zeroOrMore(topLevel)
     }
 
-    fun parse(input: String): List<FunctionNode>? {
+    fun parse(input: String): List<TopLevel>? {
         try {
             return when (val result = grammar.parse(input)) {
                 is ParsedValue -> result.value

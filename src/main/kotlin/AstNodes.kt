@@ -19,9 +19,10 @@ sealed class ExprNode(offset: Int) : AstNode(offset), ProofElement
 sealed class StatementNode(offset: Int) : AstNode(offset)
 sealed class TypeExprNode(offset: Int) : AstNode(offset)
 interface ProofElement
+interface TopLevel
 
 class FunctionNode(val name: String, val contract: FunctionContract?, val arguments: List<ArgumentNode>,
-                   val returnType: TypeExprNode, val body: BlockNode, val nameOffset: Int, offset: Int) : AstNode(offset)
+                   val returnType: TypeExprNode, val body: BlockNode, val nameOffset: Int, offset: Int) : AstNode(offset), TopLevel
 
 class ArgumentNode(val name: String, val type: TypeExprNode, offset: Int) : AstNode(offset)
 
@@ -29,10 +30,14 @@ class FunctionContract(val input: ProofBlockNode, val output: ProofBlockNode?, o
 
 // =============== Proofs ===============
 
+class DeductionBlockNode(val inputs: List<ExprNode>, val body: ProofBlockNode, offset: Int) : AstNode(offset), ProofElement
+
 class LetEqualsNode(val name: String, val expr: ExprNode, val nameOffset: Int, offset: Int) : AstNode(offset), ProofElement
 
 class ProofFunctionNode(val name: String, val contract: FunctionContract?, val arguments: List<ArgumentNode>,
                         val body: ProofBlockNode, val nameOffset: Int, offset: Int) : AstNode(offset), ProofElement
+
+class AxiomNode(val name: String?, val arguments: List<ArgumentNode>, val body: ProofBlockNode, offset: Int) : AstNode(offset), TopLevel
 
 // =============== Expressions ===============
 

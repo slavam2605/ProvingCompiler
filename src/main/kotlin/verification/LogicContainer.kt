@@ -4,9 +4,14 @@ import org.example.*
 import org.example.output.CompilerMessagePrinter
 import java.util.*
 
-class LogicContainer(private val compilerMessagePrinter: CompilerMessagePrinter) {
+class LogicContainer(internal val compilerMessagePrinter: CompilerMessagePrinter) {
     internal val trueList = mutableListOf<LogicExpr>()
     internal val compareEqualitySets = CompareEqualitySets()
+    internal val axiomList = mutableListOf<LogicExpr>()
+
+    fun addAxiom(expr: LogicExpr) {
+        axiomList.add(expr)
+    }
 
     fun addTrue(expr: LogicExpr, noSplit: Boolean = false) {
         trueList.add(expr)
@@ -32,92 +37,6 @@ class LogicContainer(private val compilerMessagePrinter: CompilerMessagePrinter)
         }
         compareEqualitySets.clear()
         trueList.forEach { addToSet(it, noSplit = false) }
-    }
-
-    /**
-     * Given [invocationExpr] `foo(expr1, expr2, ...)` where `foo` is `fun(a, b, ...)`
-     * replaces `a` with `expr1`, `b` with `expr2` etc. in [expr]
-     */
-    private fun replaceWithInvocationArguments(expr: LogicExpr, invocationExpr: LogicInvocation) =
-        expr.replaceTree { innerExpr ->
-            val symbol = (innerExpr as? LogicVar)?.symbol ?: return@replaceTree null
-            val index = invocationExpr.symbol.arguments.indexOfFirst { it === symbol }.takeIf { it >= 0 }
-                ?: return@replaceTree null
-            invocationExpr.arguments[index]
-        }
-
-    private fun applyOutputContract(invocationExpr: LogicInvocation) {
-        val output = invocationExpr.symbol.contract?.output ?: return
-        val exprList = output.exprList
-            .map { LogicExpr.fromAstNotNull(it as ExprNode) { return } }
-            .map { replaceWithInvocationArguments(it, invocationExpr) }
-        exprList.forEach {
-            addTrue(it, noSplit = true)
-        }
-    }
-
-    private fun checkInputContract(verifier: ProofVerifier, invocationExpr: LogicInvocation): Boolean {
-        val input = invocationExpr.symbol.contract?.input ?: return true
-        // TODO print compiler error if exprList contains something other than ExprNode
-        val exprList = input.exprList
-            .map { LogicExpr.fromAstNotNull(it as ExprNode) { return false } }
-            .map { replaceWithInvocationArguments(it, invocationExpr) }
-        exprList.forEachIndexed { index, inputExpr ->
-            if (!verifier.verifyExpr(inputExpr)) {
-                val node = (invocationExpr.symbol as LanguageResolver.ResolvedSymbol.ProofFunction).node
-                compilerMessagePrinter.printError((input.exprList[index] as ExprNode).offset, "Failed to prove input contract", "for proof '${node.name}'")
-                return false
-            }
-        }
-        return true
-    }
-
-    /**
-     * If [skipVerification] is true, then assume that all elements are true and just add them.
-     * @return `true` if verification was successful. Always `true` if [skipVerification] is `true`.
-     */
-    fun verifyProofAndCollect(list: List<ProofElement>, skipVerification: Boolean): Boolean {
-        val verifier = ProofVerifier(this)
-        val letAliases = mutableMapOf<String, LogicExpr>()
-        fun replaceAliases(expr: LogicExpr) = expr.replaceTree { innerExpr ->
-            ((innerExpr as? LogicVar)?.symbol as? LanguageResolver.ResolvedSymbol.LetAlias)?.let { letAliases[it.name] }
-        }
-
-        val logicList = list.map { (it as? ExprNode)?.let { e -> LogicExpr.fromAst(e) } }
-        logicList.forEachIndexed { index, proofElement ->
-            when {
-                proofElement != null -> {
-                    val expr = replaceAliases(proofElement)
-                    if (expr is LogicInvocation && expr.symbol is LanguageResolver.ResolvedSymbol.ProofFunction)  {
-                        if (skipVerification) {
-                            error("Can't skip verification for proof invocation")
-                        }
-                        compilerMessagePrinter.withContext(LanguageResolver.ErrorContext((list[index] as ExprNode).offset)) {
-                            if (!checkInputContract(verifier, expr))
-                                return false
-                        }
-                        applyOutputContract(expr)
-                        return@forEachIndexed
-                    }
-
-                    if (!skipVerification && !verifier.verifyExpr(expr)) {
-                        // TODO add expansion of let-elements
-                        compilerMessagePrinter.printError((list[index] as AstNode).offset, "Failed to prove the proof element", "here")
-                        return false
-                    }
-
-                    // Don't split provided expressions, they may be needed later
-                    addTrue(expr, noSplit = true)
-                }
-                list[index] is LetEqualsNode -> {
-                    val letEqualsNode = list[index] as LetEqualsNode
-                    letAliases[letEqualsNode.name] = LogicExpr.fromAstNotNull(letEqualsNode.expr) { return false }
-                }
-                list[index] is ProofFunctionNode -> { /* Skip proof declaration */ }
-                else -> error("Unknown proof element: ${list[index].javaClass}")
-            }
-        }
-        return true
     }
 
     /**
@@ -177,9 +96,18 @@ class LogicContainer(private val compilerMessagePrinter: CompilerMessagePrinter)
     fun clone(): LogicContainer {
         return LogicContainer(compilerMessagePrinter).also {
             it.trueList.addAll(trueList)
+            // TODO clone equality set instead of adding true statements
             trueList.forEach { expr ->
                 it.compareEqualitySets.addTrueExpr(expr)
             }
+            // TODO solve axiom problem
+            it.axiomList.addAll(axiomList)
+        }
+    }
+
+    fun cloneOnlyAxioms(): LogicContainer {
+        return LogicContainer(compilerMessagePrinter).also {
+            it.axiomList.addAll(axiomList)
         }
     }
 
@@ -199,6 +127,7 @@ class LogicContainer(private val compilerMessagePrinter: CompilerMessagePrinter)
             if (right.trueList.contains(LogicBool(false)))
                 return left
 
+            // TODO clone axioms somehow, they are lost here
             val result = LogicContainer(left.compilerMessagePrinter)
 
             // Filter out common expressions
@@ -353,7 +282,7 @@ sealed class LogicExpr(private val precedence: Int, vararg val children: LogicEx
 
         inline fun fromAstNotNull(node: ExprNode, onNull: () -> Nothing): LogicExpr {
             return fromAst(node) ?: run {
-                println("Warning: failed to add true expression $node")
+                System.err.println("Warning: failed to add true expression $node")
                 onNull()
             }
         }

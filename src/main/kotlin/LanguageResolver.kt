@@ -5,9 +5,9 @@ import org.example.output.CompilerMessagePrinter
 import org.example.verification.*
 import java.lang.NumberFormatException
 
-class LanguageResolver(private val input: String) {
+class LanguageResolver {
     private val symbolMap = ScopeStack()
-    private val compilerMessagePrinter = CompilerMessagePrinter(input)
+    private val compilerMessagePrinter = CompilerMessagePrinter()
     private var logicContainer = LogicContainer(compilerMessagePrinter)
     private var currentFunction: ResolvedSymbol.Function? = null
 
@@ -66,7 +66,8 @@ class LanguageResolver(private val input: String) {
                 argumentsMap[symbol.arguments[i].name] = node.arguments[i]
             }
             val proofElementList = replaceContractOutputPattern(outputContract, node, argumentsMap)
-            logicContainer.verifyProofAndCollect(proofElementList, skipVerification = true)
+            ProofVerifier(null, emptyList(), logicContainer)
+                .verifyProofAndCollect(proofElementList, skipVerification = true)
         }
 
         return symbol.returnType
@@ -309,6 +310,14 @@ class LanguageResolver(private val input: String) {
         return true
     }
 
+    private fun resolveDeductionBlock(node: DeductionBlockNode): Boolean {
+        node.inputs.forEach {
+            resolveExpr(it) ?: return false
+        }
+        resolveProofBlock(node.body, onlyResolve = true)
+        return true
+    }
+
     /**
      * Resolves and verifies a proof block [node].
      * @param skipVerification if `true`, assumes that all expressions are true and just adds them without verification
@@ -321,14 +330,17 @@ class LanguageResolver(private val input: String) {
                     is ExprNode -> resolveExpr(it) != null
                     is LetEqualsNode -> resolveLetEquals(it)
                     is ProofFunctionNode -> resolveProofFunction(it)
+                    is DeductionBlockNode -> resolveDeductionBlock(it)
                     else -> error("Unknown proof element: ${it.javaClass}")
                 }
                 if (!result) return false
             }
         }
 
+        // TODO split resolve and verification
         if (onlyResolve) return true
-        return logicContainer.verifyProofAndCollect(node.exprList, skipVerification = skipVerification)
+        return ProofVerifier(null, emptyList(), logicContainer)
+            .verifyProofAndCollect(node.exprList, skipVerification = skipVerification)
     }
 
     private fun resolveCompilerCommand(node: CompilerCommandNode): Boolean {
@@ -405,22 +417,70 @@ class LanguageResolver(private val input: String) {
         return true
     }
 
-    fun resolveFile(topLevel: List<FunctionNode>): Boolean {
-        // Create top-level file scope
-        symbolMap.pushScope()
+    private fun resolveAxiomDeclaration(node: AxiomNode): Boolean {
+        symbolMap.withScope {
+            node.arguments.forEach {
+                val type = resolveType(it.type) ?: return false
+                val symbol = ResolvedSymbol.PatternName(it.name, type)
+                node[ResolvedSymbol.key] = symbol
+                symbolMap[it.name] = symbol
+            }
 
-        topLevel.forEach {
-            if (!resolveFunctionDeclaration(it))
+            // TODO organize axioms so they are not lost, maybe keep a stack of logicContainers, maybe clone axioms
+            withLogicContainer(logicContainer.cloneOnlyAxioms()) {
+                if (!resolveProofBlock(node.body))
+                    return false
+            }
+
+            val axiom = node.body.exprList.lastOrNull()
+            if (axiom == null) {
+                compilerMessagePrinter.printError(node.offset, "Axiom declaration is empty", "here")
                 return false
-        }
-
-        // TODO exit if error occurred
-
-        topLevel.forEach {
-            if (!resolveFunctionBody(it))
+            }
+            if (axiom !is ExprNode) {
+                compilerMessagePrinter.printError((axiom as AstNode).offset, "Last element of axiom declaration must be an expression", "here")
                 return false
+            }
+            val logicExpr = LogicExpr.fromAstNotNull(axiom) { return false }
+            logicContainer.addAxiom(logicExpr)
         }
         return true
+    }
+
+    private fun <T> resolveTopLevelDeclaration(node: T): Boolean where T: AstNode, T: TopLevel {
+        return when (node) {
+            is FunctionNode -> resolveFunctionDeclaration(node)
+            is AxiomNode -> resolveAxiomDeclaration(node)
+            else -> error("Unknown top-level node: ${node.javaClass}")
+        }
+    }
+
+    private fun <T> resolveTopLevelBody(node: T): Boolean where T: AstNode, T: TopLevel {
+        return when (node) {
+            is FunctionNode -> resolveFunctionBody(node)
+            is AxiomNode -> true // Already resolved during the first pass
+            else -> error("Unknown top-level node: ${node.javaClass}")
+        }
+    }
+
+    fun resolveFile(fileText: String, topLevel: List<TopLevel>): Boolean {
+        compilerMessagePrinter.withInput(fileText) {
+            // Create top-level file scope
+            symbolMap.pushScope()
+
+            topLevel.forEach {
+                it as AstNode
+                if (!resolveTopLevelDeclaration(it))
+                    return false
+            }
+
+            topLevel.forEach {
+                it as AstNode
+                if (!resolveTopLevelBody(it))
+                    return false
+            }
+            return true
+        }
     }
 
     private fun assertType(found: ResolvedType?, expected: ResolvedType, offset: Int, hint: String = "here"): ResolvedType? {
@@ -532,7 +592,7 @@ class LanguageResolver(private val input: String) {
             override fun toString() = "alias($name)"
         }
 
-        class PatternName(name: String) : ResolvedSymbol(name, TypeErrorMarker) {
+        class PatternName(name: String, type: ResolvedType) : ResolvedSymbol(name, type) {
             override fun toString() = "\$$name"
         }
 
